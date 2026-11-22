@@ -1,8 +1,5 @@
 package com.yin.term.data.datasource
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import com.yin.term.YinTermApp
 import com.yin.term.core.AppDispatchers
 import com.yin.term.domain.model.TerminalLog
@@ -37,11 +34,12 @@ class TerminalSession(
     companion object {
         private const val PWD_MARKER = "__YINTERM_PWD__:"
         private const val STREAM_BUFFER_SIZE = 4096
+        const val CRASH_FILE_NAME = "yinterm_crash.txt"
 
         @Volatile
         private var crashHandlerInstalled = false
 
-        private fun installCrashLogger() {
+        fun installCrashLogger() {
             if (crashHandlerInstalled) return
             crashHandlerInstalled = true
             val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -51,11 +49,10 @@ class TerminalSession(
                     throwable.printStackTrace(PrintWriter(sw))
                     val trace = "Thread: ${thread.name}\n$sw"
                     val app = YinTermApp.instance
+                    File(app.filesDir, CRASH_FILE_NAME).writeText(trace)
                     app.getExternalFilesDir(null)?.let { dir ->
-                        File(dir, "yinterm_crash.txt").writeText(trace)
+                        File(dir, CRASH_FILE_NAME).writeText(trace)
                     }
-                    val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                    clipboard?.setPrimaryClip(ClipData.newPlainText("YinTerm Crash", trace))
                 }
                 previousHandler?.uncaughtException(thread, throwable)
             }

@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.yin.term.YinTermApp
 import com.yin.term.core.AppDispatchers
 import com.yin.term.data.datasource.ShellManager
+import com.yin.term.data.datasource.TerminalSession
 import com.yin.term.domain.model.Settings
 import com.yin.term.domain.model.TerminalLog
 import com.yin.term.domain.model.TerminalState
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class TerminalViewModel(
     private val commandExecutor: CommandExecutor,
@@ -51,6 +53,7 @@ class TerminalViewModel(
 
     init {
         viewModelScope.launch(dispatchers.io) {
+            reportPreviousCrashIfAny()
             shellManager.initialize(preferRoot = true)
             _uiState.update { it.copy(isRoot = shellManager.isRootActive.value) }
 
@@ -101,6 +104,19 @@ class TerminalViewModel(
             terminalLogRepository.addLog(
                 TerminalLog(TerminalState.Success, "Shell session restarted.\n")
             )
+        }
+    }
+
+    private suspend fun reportPreviousCrashIfAny() {
+        runCatching {
+            val crashFile = File(YinTermApp.instance.filesDir, TerminalSession.CRASH_FILE_NAME)
+            if (crashFile.exists()) {
+                val trace = crashFile.readText().take(2000)
+                crashFile.delete()
+                terminalLogRepository.addLog(
+                    TerminalLog(TerminalState.Error, "[PREVIOUS CRASH LOG]\n$trace\n")
+                )
+            }
         }
     }
 
@@ -196,9 +212,8 @@ class TerminalViewModel(
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val app = YinTermApp.instance
-                val executor = app.container.commandExecutor
                 return TerminalViewModel(
-                    commandExecutor = executor,
+                    commandExecutor = app.container.commandExecutor,
                     dispatchers = app.dispatchers,
                     settingsRepository = app.container.settingsRepository,
                     terminalLogRepository = app.container.terminalLogRepository

@@ -3,10 +3,13 @@ package com.yin.term.ui.terminal
 import android.content.Intent
 import android.os.Environment
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,10 +31,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.CircularProgressIndicator
@@ -53,9 +56,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -94,6 +99,8 @@ fun Terminal(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val currentDirectory by viewModel.currentDirectory.collectAsStateWithLifecycle()
     val isRootActive by viewModel.isRootActive.collectAsStateWithLifecycle()
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
 
     LaunchedEffect(viewModel) {
         terminalCommandChannel.collect { command ->
@@ -133,7 +140,18 @@ fun Terminal(
 
     Scaffold(
         containerColor = ObsidianBlack,
-        topBar = { TerminalTopBar(viewModel, uiState, isRootActive) }
+        topBar = {
+            TerminalTopBar(
+                viewModel = viewModel,
+                uiState = uiState,
+                isRootActive = isRootActive,
+                onCopyAll = {
+                    val plainAll = orderedLogs.joinToString("") { it.message }
+                    clipboardManager.setText(AnnotatedString(plainAll))
+                    Toast.makeText(context, "Output copied", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -152,31 +170,33 @@ fun Terminal(
 
             HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
 
-            // High-FPS Scrollback (ANSI Colors + Emoji Support)
+            // High-FPS Scrollback (ANSI Colors + Emoji Support, Long-Press Line to Copy)
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
                     .background(ObsidianBlack)
             ) {
-                SelectionContainer {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(1.dp)
-                    ) {
-                        itemsIndexed(
-                            items = orderedLogs,
-                            key = { index, _ -> index }
-                        ) { _, log ->
-                            LogLineItem(
-                                log = log,
-                                fontSizeSp = fontSizeSp,
-                                defaultSuccessColor = customSuccessColor,
-                                defaultErrorColor = customErrorColor
-                            )
-                        }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(1.dp)
+                ) {
+                    itemsIndexed(
+                        items = orderedLogs,
+                        key = { index, _ -> index }
+                    ) { _, log ->
+                        LogLineItem(
+                            log = log,
+                            fontSizeSp = fontSizeSp,
+                            defaultSuccessColor = customSuccessColor,
+                            defaultErrorColor = customErrorColor,
+                            onCopyLine = { text ->
+                                clipboardManager.setText(AnnotatedString(text))
+                                Toast.makeText(context, "Line copied", Toast.LENGTH_SHORT).show()
+                            }
+                        )
                     }
                 }
 
@@ -320,12 +340,14 @@ private fun SessionStatusStrip(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun LogLineItem(
     log: TerminalLog,
     fontSizeSp: Int,
     defaultSuccessColor: Color,
-    defaultErrorColor: Color
+    defaultErrorColor: Color,
+    onCopyLine: (String) -> Unit
 ) {
     val baseColor = when (log.state) {
         TerminalState.Error -> defaultErrorColor
@@ -346,7 +368,12 @@ private fun LogLineItem(
             fontSizeSp = fontSizeSp,
             defaultColor = baseColor
         ),
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = {},
+                onLongClick = { onCopyLine(parsed.text) }
+            )
     )
 }
 
@@ -510,7 +537,8 @@ private fun PromptInputRow(
 private fun TerminalTopBar(
     viewModel: TerminalViewModel,
     uiState: TerminalUiState,
-    isRootActive: Boolean
+    isRootActive: Boolean,
+    onCopyAll: () -> Unit
 ) {
     val uriHandler = LocalUriHandler.current
     val context = LocalContext.current
@@ -586,6 +614,26 @@ private fun TerminalTopBar(
                         imageVector = YinIcons.Clear,
                         contentDescription = "Terminate",
                         tint = CrimsonRed
+                    )
+                }
+            )
+            DropdownMenuItem(
+                text = {
+                    Text(
+                        text = "Copy all output",
+                        color = TerminalTextPrimary,
+                        fontFamily = FontFamily.Monospace
+                    )
+                },
+                onClick = {
+                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
+                    onCopyAll()
+                },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.ContentCopy,
+                        contentDescription = "Copy",
+                        tint = TerminalTextPrimary
                     )
                 }
             )

@@ -1,8 +1,13 @@
-# Entry points & BuildConfig (internal packages ui, data, core, di remain obfuscated)
+# Keep obfuscation enabled for internal classes/methods while preventing R8 from deleting JNI/reflection targets
+-dontshrink
+-dontoptimize
+
+# Entry points & BuildConfig
 -keep class com.yin.term.YinTermApp { *; }
 -keep class com.yin.term.MainActivity { *; }
 -keep class yin.term.BuildConfig { *; }
 -keep class com.yin.term.BuildConfig { *; }
+-keep class yin.term.R$* { *; }
 
 # Keep domain & data models for JSON serialization
 -keep class com.yin.term.domain.model.** { *; }
@@ -21,22 +26,13 @@
 -keep class com.topjohnwu.superuser.** { *; }
 -dontwarn com.topjohnwu.superuser.**
 
-# Keep Kotlin Coroutines MainDispatcher & ServiceLoader (prevents startup crash)
--keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
--keepclassmembers class kotlinx.coroutines.** {
-    volatile <fields>;
-}
--keep class kotlinx.coroutines.android.** { *; }
+# Keep Kotlin Coroutines & AndroidX runtime components
+-keep class kotlinx.coroutines.** { *; }
 -dontwarn kotlinx.coroutines.**
-
-# Keep AndroidX Startup, Emoji2, SplashScreen, and Navigation
--keep class androidx.startup.** { *; }
--keep class androidx.emoji2.** { *; }
--keep class androidx.core.splashscreen.** { *; }
--keep class androidx.navigation.** { *; }
+-keep class androidx.** { *; }
+-dontwarn androidx.**
 
 # Preserve essential attributes for Compose & Kotlin metadata
--keepattributes Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations
--keep class kotlin.Metadata { *; }
+-keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,Exceptions
+-keep class kotlin.** { *; }
 -dontwarn kotlin.**
