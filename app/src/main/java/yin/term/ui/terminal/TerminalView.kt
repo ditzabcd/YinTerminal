@@ -108,7 +108,7 @@ fun Terminal(
         }
     }
 
-    val orderedLogs = remember(uiState.logs) { uiState.logs.asReversed() }
+    val orderedLogs = remember(uiState.logs) { uiState.logs.toList().asReversed() }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
 
@@ -160,7 +160,6 @@ fun Terminal(
                 .padding(paddingValues)
                 .imePadding()
         ) {
-            // Active Session & Working Directory Bar (`cd` synced)
             SessionStatusStrip(
                 currentDirectory = currentDirectory,
                 isRootActive = isRootActive,
@@ -170,7 +169,6 @@ fun Terminal(
 
             HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
 
-            // High-FPS Scrollback (ANSI Colors + Emoji Support, Long-Press Line to Copy)
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -239,7 +237,6 @@ fun Terminal(
 
             HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
 
-            // Quick Terminal Keys & Shortcuts
             QuickKeysRow(
                 onInterrupt = { viewModel.onEvent(TerminalUiEvent.Terminate) },
                 onInsert = { token ->
@@ -253,7 +250,6 @@ fun Terminal(
 
             HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
 
-            // Prompt Input Bar
             PromptInputRow(
                 command = uiState.command,
                 isRootActive = isRootActive,

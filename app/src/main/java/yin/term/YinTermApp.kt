@@ -2,21 +2,21 @@ package com.yin.term
 
 import android.app.Application
 import com.yin.term.core.AppDispatchers
+import com.yin.term.data.datasource.TerminalSession
 import com.yin.term.di.AppContainer
 
 class YinTermApp : Application() {
 
-    lateinit var dispatchers: AppDispatchers
-        private set
+    val dispatchers: AppDispatchers = AppDispatchers()
 
     lateinit var container: AppContainer
         private set
 
     override fun onCreate() {
-        super.onCreate()
         instance = this
-        dispatchers = AppDispatchers()
-        container = AppContainer(this, dispatchers)
+        TerminalSession.installCrashLogger()
+        super.onCreate()
+        container = AppContainer(this)
     }
 
     companion object {
