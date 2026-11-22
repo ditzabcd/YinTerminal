@@ -1,0 +1,41 @@
+# --- Build Outputs ---
+/build/
+/release/
+app/release/
+app/phone/
+app/emulator/
+
+*.apk
+*.aab
+*.bundle
+*.dm
+output-metadata.json
+
+# --- Android Studio / IntelliJ ---
+*.iml
+.idea/
+/captures/
+.externalNativeBuild/
+.cxx/
+/shelf/
+
+# --- Local Configuration ---
+local.properties
+.gradle/
+*.iml
+
+# --- Keystores & Secrets ---
+*.jks
+*.keystore
+*.p12
+*.key
+google-services.json
+keystore.properties
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+*.log
+
+# --- Android Profiling ---
+*.hprof

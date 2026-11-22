@@ -1,0 +1,31 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Folder icon base -->
+    <path
+        android:fillColor="#000000"
+        android:pathData="M10,25C10,22.2 12.2,20 15,20H40L45,25H93C95.8,25 98,27.2 98,30V83C98,85.8 95.8,88 93,88H15C12.2,88 10,85.8 10,83V25Z" />
+    <!-- YinYang Symbol inside folder -->
+    <group
+        android:translateX="34"
+        android:translateY="39">
+        <!-- Light half -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M20,0C8.95,0 0,8.95 0,20C0,31.05 8.95,40 20,40C20,40 20,30 20,30C20,24.48 15.52,20 10,20C15.52,20 20,15.52 20,10C20,10 20,0 20,0Z" />
+        <!-- Dark half -->
+        <path
+            android:fillColor="#000000"
+            android:pathData="M20,0C20,0 20,10 20,10C20,15.52 24.48,20 30,20C24.48,20 20,24.48 20,30C20,30 20,40 20,40C31.05,40 40,31.05 40,20C40,8.95 31.05,0 20,0Z" />
+        <!-- Terminal Prompt '>' in light half -->
+        <path
+            android:fillColor="#000000"
+            android:pathData="M8,8L12,10L8,12V11L10,10L8,9V8Z" />
+        <!-- Cursor '_' in dark half -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M28,30H32V31H28V30Z" />
+    </group>
+</vector>

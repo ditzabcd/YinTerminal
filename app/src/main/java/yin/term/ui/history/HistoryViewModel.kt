@@ -1,0 +1,90 @@
+package com.yin.term.ui.history
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import com.yin.term.YinTermApp
+import com.yin.term.core.AppDispatchers
+import com.yin.term.domain.model.History
+import com.yin.term.domain.repository.HistoryRepository
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+class HistoryViewModel(
+    private val historyRepository: HistoryRepository,
+    private val dispatchers: AppDispatchers
+) : ViewModel() {
+
+    private val _uiState = MutableStateFlow(HistoryUiState())
+    val uiState: StateFlow<HistoryUiState> = _uiState.asStateFlow()
+
+    private val _uiEffect = Channel<HistoryUiEffect>(Channel.BUFFERED)
+    val uiEffect = _uiEffect.receiveAsFlow()
+
+    init {
+        viewModelScope.launch {
+            historyRepository.getHistory()
+                .flowOn(dispatchers.io)
+                .collect { history ->
+                    _uiState.update { it.copy(history = history, isLoading = false) }
+                }
+        }
+    }
+
+    fun onEvent(event: HistoryUiEvent) {
+        when (event) {
+            is HistoryUiEvent.ClearHistory -> clearHistory()
+            is HistoryUiEvent.DeleteHistoryItem -> deleteHistoryItem(event.history)
+            is HistoryUiEvent.UndoDeleteHistoryItems -> undoDeleteHistoryItems()
+        }
+    }
+
+    private fun clearHistory() {
+        viewModelScope.launch(dispatchers.io) {
+            val snapshot = _uiState.value.history
+            if (snapshot.isNotEmpty()) {
+                _uiState.update { it.copy(historyBackup = snapshot.toList()) }
+                historyRepository.clearHistory()
+                _uiEffect.send(HistoryUiEffect.ShowSnackbar("History Cleared", "Undo"))
+            }
+        }
+    }
+
+    private fun deleteHistoryItem(history: History) {
+        viewModelScope.launch(dispatchers.io) {
+            val snapshot = _uiState.value.history
+            _uiState.update { it.copy(historyBackup = snapshot.toList()) }
+            historyRepository.deleteHistoryWithId(history.id)
+            _uiEffect.send(HistoryUiEffect.ShowSnackbar("History Item Deleted", "Undo"))
+        }
+    }
+
+    private fun undoDeleteHistoryItems() {
+        viewModelScope.launch(dispatchers.io) {
+            val backup = _uiState.value.historyBackup
+            if (backup.isNotEmpty()) {
+                historyRepository.restoreHistory(backup)
+                _uiState.update { it.copy(historyBackup = emptyList()) }
+            }
+        }
+    }
+
+    companion object {
+        val Factory: ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                val app = YinTermApp.instance
+                return HistoryViewModel(
+                    historyRepository = app.container.historyRepository,
+                    dispatchers = app.dispatchers
+                ) as T
+            }
+        }
+    }
+}
