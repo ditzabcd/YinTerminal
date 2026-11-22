@@ -1,5 +1,8 @@
 package com.yin.term.data.datasource
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import com.yin.term.YinTermApp
 import com.yin.term.core.AppDispatchers
 import com.yin.term.domain.model.TerminalLog
@@ -47,9 +50,12 @@ class TerminalSession(
                     val sw = StringWriter()
                     throwable.printStackTrace(PrintWriter(sw))
                     val trace = "Thread: ${thread.name}\n$sw"
-                    YinTermApp.instance.getExternalFilesDir(null)?.let { dir ->
+                    val app = YinTermApp.instance
+                    app.getExternalFilesDir(null)?.let { dir ->
                         File(dir, "yinterm_crash.txt").writeText(trace)
                     }
+                    val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    clipboard?.setPrimaryClip(ClipData.newPlainText("YinTerm Crash", trace))
                 }
                 previousHandler?.uncaughtException(thread, throwable)
             }
