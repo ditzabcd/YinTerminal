@@ -8,7 +8,7 @@
         tools:ignore="AllFilesAccessPolicy,ScopedStorage" />
 
     <application
-        android:name=".YinTermApp"
+        android:name="com.yin.term.YinTermApp"
         android:allowBackup="false"
         android:dataExtractionRules="@null"
         android:fullBackupContent="@null"
@@ -21,7 +21,7 @@
         tools:replace="android:allowBackup">
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.yin.term.MainActivity"
             android:exported="true"
             android:theme="@style/Theme.Starting"
             android:windowSoftInputMode="adjustResize">
@@ -30,11 +30,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <service
-            android:name=".data.datasource.PythonService"
-            android:exported="false"
-            android:process=":python_worker" />
 
     </application>
 </manifest>
