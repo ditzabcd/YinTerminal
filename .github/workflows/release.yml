@@ -1,0 +1,148 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths-ignore:
+      - "README.md"
+      - "LICENSE"
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Custom version (contoh: 1.1.0). Kosongkan untuk auto-increment patch"
+        required: false
+        type: string
+      note:
+        description: "Catatan rilis tambahan (opsional)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Resolve version & changelog
+        run: |
+          git fetch --tags --force
+          LAST_TAG=$(git tag -l "v*.*.*" --sort=-v:refname | head -n 1)
+
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            RAW_VER="${{ github.event.inputs.version }}"
+            VERSION_NAME="${RAW_VER#v}"
+          elif [ -z "$LAST_TAG" ]; then
+            VERSION_NAME="1.0.0"
+          else
+            CLEAN_TAG="${LAST_TAG#v}"
+            MAJOR=$(echo "$CLEAN_TAG" | cut -d. -f1)
+            MINOR=$(echo "$CLEAN_TAG" | cut -d. -f2)
+            PATCH=$(echo "$CLEAN_TAG" | cut -d. -f3)
+            PATCH=$((PATCH + 1))
+            VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
+          fi
+
+          TAG_NAME="v${VERSION_NAME}"
+          VERSION_CODE="${{ github.run_number }}"
+
+          sed -i "s/versionCode = [0-9]*/versionCode = $VERSION_CODE/" app/build.gradle.kts
+          sed -i "s/versionName = \"[^\"]*\"/versionName = \"$VERSION_NAME\"/" app/build.gradle.kts
+
+          {
+            echo "## Changes"
+            if [ -n "${{ github.event.inputs.note }}" ]; then
+              echo "- ${{ github.event.inputs.note }}"
+            fi
+
+            if [ -n "$LAST_TAG" ]; then
+              COMMITS=$(git log "${LAST_TAG}..HEAD" --no-merges --pretty=format:"- %s" \
+                | grep -vE "^- (Merge |Update README|Create README)" || true)
+            else
+              COMMITS=$(git log -n 10 --no-merges --pretty=format:"- %s" || true)
+            fi
+
+            if [ -n "$COMMITS" ]; then
+              echo "$COMMITS"
+            elif [ -z "${{ github.event.inputs.note }}" ]; then
+              HEAD_MSG=$(git log -1 --pretty=format:"%s")
+              echo "- ${HEAD_MSG:-Bug fixes and improvements}"
+            fi
+          } > release_notes.md
+
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+
+      - name: Build & sign release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+
+          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            echo "Release APK not found."
+            exit 1
+          fi
+
+          ANDROID_SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          BUILD_TOOLS=$(ls -d "$ANDROID_SDK/build-tools/"* | sort -V | tail -n 1)
+          FINAL_APK="$GITHUB_WORKSPACE/YinTerm-${TAG_NAME}-arm64.apk"
+
+          keytool -genkeypair -v \
+            -keystore release.keystore \
+            -alias yinterm \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass yinterm123 \
+            -keypass yinterm123 \
+            -dname "CN=YinTerm, OU=Mobile, O=YinTerm, L=Pekanbaru, S=Riau, C=ID"
+
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" aligned.apk
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks release.keystore \
+            --ks-pass pass:yinterm123 \
+            --key-pass pass:yinterm123 \
+            --out "$FINAL_APK" \
+            aligned.apk
+
+          SHA256=$(sha256sum "$FINAL_APK" | awk '{print $1}')
+          {
+            echo ""
+            echo "**SHA-256:** \`$SHA256\`"
+          } >> release_notes.md
+
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release delete "$TAG_NAME" -y
+          fi
+
+          gh release create "$TAG_NAME" "$FINAL_APK" \
+            --title "YinTerm $TAG_NAME" \
+            --notes-file release_notes.md
