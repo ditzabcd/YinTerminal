@@ -34,11 +34,15 @@ class TerminalViewModel(
     private val commandExecutor: CommandExecutor,
     private val dispatchers: AppDispatchers,
     private val settingsRepository: SettingsRepository,
-    private val terminalLogRepository: TerminalLogRepository,
-    private val shellManager: ShellManager
+    private val terminalLogRepository: TerminalLogRepository
 ) : ViewModel() {
 
-    // Prioritas default ke mode Root (su)
+    private val shellManager: ShellManager = ShellManager.instance ?: ShellManager(
+        settingsRepository = settingsRepository,
+        terminalLogRepository = terminalLogRepository,
+        dispatchers = dispatchers
+    )
+
     private val _uiState = MutableStateFlow(TerminalUiState(isRoot = true))
     val uiState = _uiState.asStateFlow()
 
@@ -192,12 +196,12 @@ class TerminalViewModel(
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 val app = YinTermApp.instance
+                val executor = app.container.commandExecutor
                 return TerminalViewModel(
-                    commandExecutor = app.container.commandExecutor,
+                    commandExecutor = executor,
                     dispatchers = app.dispatchers,
                     settingsRepository = app.container.settingsRepository,
-                    terminalLogRepository = app.container.terminalLogRepository,
-                    shellManager = app.container.shellManager
+                    terminalLogRepository = app.container.terminalLogRepository
                 ) as T
             }
         }

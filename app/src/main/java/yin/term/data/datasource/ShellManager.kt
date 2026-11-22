@@ -19,6 +19,7 @@ import java.util.Base64
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.concurrent.Volatile
 
 class ShellManager(
     private val settingsRepository: SettingsRepository,
@@ -26,6 +27,10 @@ class ShellManager(
     private val dispatchers: AppDispatchers
 ) {
     companion object {
+        @Volatile
+        var instance: ShellManager? = null
+            private set
+
         private val WHITESPACE_REGEX = Regex("\\s+")
 
         private val morseMap = mapOf(
@@ -42,6 +47,10 @@ class ShellManager(
         private val reverseMorseMap: Map<String, Char> by lazy {
             morseMap.entries.associate { (k, v) -> v to k }
         }
+    }
+
+    init {
+        instance = this
     }
 
     val terminalSession = TerminalSession(terminalLogRepository, dispatchers)
