@@ -1,23 +1,26 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
-#
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# Aggressive package flattening & class/method obfuscation for app logic
+-repackageclasses 'o'
+-allowaccessmodification
+-optimizationpasses 5
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep only entry points & domain models; allow ui, data, core, and di to be obfuscated
+-keep class com.yin.term.YinTermApp { *; }
+-keep class com.yin.term.MainActivity { *; }
+-keep class com.yin.term.domain.model.** { *; }
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep Chaquopy Python 3.13 JNI & platform bindings
+-keep class com.chaquo.python.** { *; }
+-dontwarn com.chaquo.python.**
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep libsu root shell reflection classes
+-keep class com.topjohnwu.superuser.** { *; }
+-dontwarn com.topjohnwu.superuser.**
 
--keep class dedeadend.dterminal.data.datasource.PythonService** { *; }
+# Keep AndroidX Startup, Emoji2, and SplashScreen initializers
+-keep class androidx.startup.** { *; }
+-keep class androidx.emoji2.** { *; }
+-keep class androidx.core.splashscreen.** { *; }
+
+# Preserve essential annotations & Kotlin metadata for Compose/Coroutines
+-keepattributes Signature,InnerClasses,EnclosingMethod,RuntimeVisibleAnnotations
+-keep class kotlin.Metadata { *; }
