@@ -59,9 +59,7 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
 #ifdef IUTF8
         tios.c_iflag |= IUTF8;
 #endif
-        // Disable kernel line echo because Compose input bar renders user command input
         tios.c_lflag &= ~ECHO;
-        // Keep ISIG enabled so byte 0x03 (Ctrl+C) sends SIGINT to foreground process group
         tios.c_lflag |= ISIG;
         tcsetattr(masterFd, TCSANOW, &tios);
     }
@@ -130,7 +128,6 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
     }
 
     if (pid == 0) {
-        // Child process: reset signals and attach slave PTY as controlling terminal
         signal(SIGINT, SIG_DFL);
         signal(SIGQUIT, SIG_DFL);
         signal(SIGTSTP, SIG_DFL);
@@ -276,7 +273,6 @@ Java_com_yin_term_data_datasource_NativePty_sendSignal(
     (void)env;
     (void)thiz;
     if (pid <= 0) return;
-    // Negative PID targets the entire foreground process group
     kill(-pid, signalNumber);
     kill(pid, signalNumber);
 }
