@@ -1,5 +1,8 @@
 package com.yin.term.data.datasource
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import com.yin.term.YinTermApp
 import com.yin.term.core.AppDispatchers
 import com.yin.term.domain.model.TerminalLog
@@ -8,6 +11,7 @@ import com.yin.term.domain.repository.TerminalLogRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +30,7 @@ import java.io.StringWriter
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.Volatile
+import kotlin.system.exitProcess
 
 class TerminalSession(
     private val terminalLogRepository: TerminalLogRepository,
@@ -33,7 +38,8 @@ class TerminalSession(
 ) {
     companion object {
         private const val PWD_MARKER = "__YINTERM_PWD__:"
-        private const val STREAM_BUFFER_SIZE = 4096
+        private const val STREAM_BUFFER_SIZE = 8192
+        private const val FLUSH_INTERVAL_MS = 16L
         const val CRASH_FILE_NAME = "yinterm_crash.txt"
 
         @Volatile
@@ -50,12 +56,23 @@ class TerminalSession(
                     val trace = "Thread: ${thread.name}\n$sw"
                     val app = YinTermApp.instance
                     File(app.filesDir, CRASH_FILE_NAME).writeText(trace)
-                    app.getExternalFilesDir(null)?.let { dir ->
-                        File(dir, CRASH_FILE_NAME).writeText(trace)
-                    }
                 }
                 previousHandler?.uncaughtException(thread, throwable)
             }
+        }
+
+        fun terminateApplicationPermanently(context: Context? = null) {
+            runCatching {
+                context?.findActivity()?.finishAndRemoveTask()
+            }
+            android.os.Process.killProcess(android.os.Process.myPid())
+            exitProcess(0)
+        }
+
+        private tailrec fun Context.findActivity(): Activity? = when (this) {
+            is Activity -> this
+            is ContextWrapper -> baseContext.findActivity()
+            else -> null
         }
     }
 
@@ -63,7 +80,7 @@ class TerminalSession(
         installCrashLogger()
     }
 
-    private val sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
+    private var sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
     private val sessionMutex = Mutex()
     private val writeMutex = Mutex()
 
@@ -92,6 +109,9 @@ class TerminalSession(
 
             withContext(dispatchers.io) {
                 destroyInternal()
+                if (!sessionScope.isActive) {
+                    sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
+                }
 
                 var spawnedProcess: Process? = null
                 var rootGranted = false
@@ -104,7 +124,7 @@ class TerminalSession(
                     }.getOrNull()
 
                     if (suAttempt != null) {
-                        delay(120L)
+                        delay(100L)
                         if (suAttempt.isAlive) {
                             spawnedProcess = suAttempt
                             rootGranted = true
@@ -123,7 +143,7 @@ class TerminalSession(
                         terminalLogRepository.addLog(
                             TerminalLog(
                                 TerminalState.Error,
-                                "Failed to initialize shell: ${err.message ?: "Unknown Error"}\n"
+                                "Shell init failed: ${err.message ?: "Unknown error"}\n"
                             )
                         )
                         return@withContext
@@ -146,9 +166,11 @@ class TerminalSession(
                     streamOutput(spawnedProcess.errorStream, isErrorStream = true)
                 }
 
+                // Configure clean environment and sync initial working directory
                 writeRawLocked(
                     """
-                    export TERM=xterm-256color CLICOLOR=1 CLICOLOR_FORCE=1 FORCE_COLOR=1 LANG=en_US.UTF-8
+                    export TERM=xterm-256color CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
+                    export PATH="/sbin:/system/bin:/system/xbin:/vendor/bin:${'$'}PATH"
                     cd /sdcard 2>/dev/null || cd "${'$'}HOME" 2>/dev/null || cd /
                     printf '%s%s\n' '$PWD_MARKER' "${'$'}PWD"
                     """.trimIndent()
@@ -157,25 +179,30 @@ class TerminalSession(
         }
     }
 
-    suspend fun executeCommand(command: String, preferRoot: Boolean = true) {
+    suspend fun executeCommand(command: String, preferRoot: Boolean = true, context: Context? = null) {
+        val trimmed = command.trim()
+        if (trimmed.isEmpty()) return
+
+        if (isExitCommand(trimmed)) {
+            shutdownAndKillApp(context)
+            return
+        }
+
         if (preferRoot != _isRootActive.value && shellProcess?.isAlive == true) {
             restartSession(preferRoot)
         } else {
             ensureSessionStarted(preferRoot)
         }
 
-        val trimmed = command.trim()
-        if (trimmed.isEmpty()) return
-
         if (trimmed == "su" && !_isRootActive.value) {
             restartSession(preferRoot = true)
             if (_isRootActive.value) {
                 terminalLogRepository.addLog(
-                    TerminalLog(TerminalState.Success, "Switched to ROOT shell (#)\n")
+                    TerminalLog(TerminalState.Success, "Switched to root shell (#)\n")
                 )
             } else {
                 terminalLogRepository.addLog(
-                    TerminalLog(TerminalState.Error, "su: Permission denied (device not rooted)\n")
+                    TerminalLog(TerminalState.Error, "su: permission denied\n")
                 )
             }
             return
@@ -199,6 +226,21 @@ class TerminalSession(
         }
     }
 
+    fun isExitCommand(rawCommand: String): Boolean {
+        val token = rawCommand.trim().substringBefore(' ')
+        return token == "exit" || token == "logout" || token == "quit"
+    }
+
+    suspend fun shutdownAndKillApp(context: Context? = null) {
+        withContext(dispatchers.io) {
+            destroyInternal()
+            sessionScope.cancel()
+        }
+        withContext(dispatchers.main) {
+            terminateApplicationPermanently(context)
+        }
+    }
+
     suspend fun sendInterrupt() {
         withContext(dispatchers.io) {
             val proc = shellProcess
@@ -209,13 +251,18 @@ class TerminalSession(
                 return@withContext
             }
 
+            // Send SIGINT to child processes only so the parent interactive shell survives
             val pid = getPid(proc)
             if (pid != -1) {
                 runCatching {
                     Runtime.getRuntime()
                         .exec(arrayOf("pkill", "-2", "-P", pid.toString()))
-                        .waitFor(300, TimeUnit.MILLISECONDS)
+                        .waitFor(250, TimeUnit.MILLISECONDS)
                 }
+            }
+            runCatching {
+                stdinWriter?.write("\u0003")
+                stdinWriter?.flush()
             }
             terminalLogRepository.addLog(
                 TerminalLog(TerminalState.Error, "^C\n")
@@ -232,19 +279,13 @@ class TerminalSession(
         ensureSessionStarted(preferRoot)
     }
 
-    private suspend fun writeRawLocked(script: String) {
+    private fun writeRawLocked(script: String) {
         try {
             val writer = stdinWriter ?: return
             writer.write(script)
             writer.newLine()
             writer.flush()
         } catch (e: Exception) {
-            terminalLogRepository.addLog(
-                TerminalLog(
-                    TerminalState.Error,
-                    "Shell write error: ${e.message ?: "Broken pipe"}\n"
-                )
-            )
             _isRunning.value = false
         }
     }
@@ -252,6 +293,7 @@ class TerminalSession(
     private suspend fun streamOutput(stream: InputStream, isErrorStream: Boolean) {
         val buffer = ByteArray(STREAM_BUFFER_SIZE)
         val pendingLine = StringBuilder()
+        var lastFlushTime = System.currentTimeMillis()
 
         try {
             while (sessionScope.isActive) {
@@ -267,7 +309,11 @@ class TerminalSession(
                     )
                 } else {
                     pendingLine.append(chunk)
-                    processStdoutBuffer(pendingLine)
+                    val now = System.currentTimeMillis()
+                    if (now - lastFlushTime >= FLUSH_INTERVAL_MS || pendingLine.contains('\n')) {
+                        processStdoutBuffer(pendingLine)
+                        lastFlushTime = now
+                    }
                 }
             }
         } catch (_: Exception) {
@@ -282,13 +328,14 @@ class TerminalSession(
     }
 
     private suspend fun processStdoutBuffer(buffer: StringBuilder) {
+        val batchLines = StringBuilder()
+
         while (true) {
             val newlineIdx = buffer.indexOf("\n")
             if (newlineIdx == -1) {
                 if (buffer.isNotEmpty() && !PWD_MARKER.startsWith(buffer.toString()) && !buffer.startsWith(PWD_MARKER)) {
-                    val partial = buffer.toString()
+                    batchLines.append(buffer)
                     buffer.clear()
-                    terminalLogRepository.addLog(TerminalLog(TerminalState.Success, partial))
                 }
                 break
             }
@@ -303,10 +350,14 @@ class TerminalSession(
                     _currentDirectory.value = newPwd
                 }
             } else {
-                terminalLogRepository.addLog(
-                    TerminalLog(TerminalState.Success, lineWithNewline)
-                )
+                batchLines.append(lineWithNewline)
             }
+        }
+
+        if (batchLines.isNotEmpty()) {
+            terminalLogRepository.addLog(
+                TerminalLog(TerminalState.Success, batchLines.toString())
+            )
         }
     }
 
@@ -316,13 +367,19 @@ class TerminalSession(
         stdoutJob = null
         stderrJob = null
 
-        runCatching { stdinWriter?.close() }
+        runCatching {
+            stdinWriter?.write("exit\n")
+            stdinWriter?.flush()
+            stdinWriter?.close()
+        }
         stdinWriter = null
 
         shellProcess?.let { proc ->
             val pid = getPid(proc)
             if (pid != -1) {
-                runCatching { Runtime.getRuntime().exec(arrayOf("pkill", "-9", "-P", pid.toString())) }
+                runCatching {
+                    Runtime.getRuntime().exec(arrayOf("pkill", "-9", "-P", pid.toString()))
+                }
             }
             runCatching { proc.inputStream.close() }
             runCatching { proc.errorStream.close() }

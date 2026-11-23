@@ -17,11 +17,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -31,35 +35,50 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Palette
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -67,30 +86,19 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.yin.term.core.AnsiParser
-import com.yin.term.core.BaseTopBar
-import com.yin.term.core.YinIcons
 import com.yin.term.domain.model.TerminalLog
 import com.yin.term.domain.model.TerminalState
-import com.yin.term.ui.theme.CrimsonDim
-import com.yin.term.ui.theme.CrimsonRed
-import com.yin.term.ui.theme.CrimsonSubtle
-import com.yin.term.ui.theme.ObsidianBlack
-import com.yin.term.ui.theme.ObsidianBorder
-import com.yin.term.ui.theme.ObsidianElevated
-import com.yin.term.ui.theme.ObsidianSurface
-import com.yin.term.ui.theme.TerminalTextMuted
-import com.yin.term.ui.theme.TerminalTextPrimary
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
-import yin.term.R
+import java.util.Locale
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun Terminal(
     viewModel: TerminalViewModel = viewModel(factory = TerminalViewModel.Factory),
@@ -99,13 +107,24 @@ fun Terminal(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val currentDirectory by viewModel.currentDirectory.collectAsStateWithLifecycle()
     val isRootActive by viewModel.isRootActive.collectAsStateWithLifecycle()
+    val themeConfig by viewModel.themeStore.theme.collectAsStateWithLifecycle()
+
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
+    val inputFocusRequester = remember { FocusRequester() }
+
+    var showContextDialog by remember { mutableStateOf(false) }
+    var selectedLineText by remember { mutableStateOf<String?>(null) }
+    var showThemeDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(viewModel) {
         terminalCommandChannel.collect { command ->
             viewModel.onEvent(TerminalUiEvent.OnCommandChange(command))
         }
+    }
+
+    LaunchedEffect(Unit) {
+        runCatching { inputFocusRequester.requestFocus() }
     }
 
     val orderedLogs = remember(uiState.logs) { uiState.logs.toList().asReversed() }
@@ -126,29 +145,29 @@ fun Terminal(
         }
     }
 
-    val fontSizeSp = uiState.settings.logFontSize.coerceIn(8, 24)
-    val customSuccessColor = if (uiState.settings.logSuccessFontColor == -1) {
-        TerminalTextPrimary
-    } else {
-        Color(uiState.settings.logSuccessFontColor)
-    }
-    val customErrorColor = if (uiState.settings.logErrorFontColor == -1) {
-        CrimsonRed
-    } else {
-        Color(uiState.settings.logErrorFontColor)
-    }
+    val bgColor = themeConfig.backgroundColor
+    val surfaceColor = themeConfig.surfaceColor
+    val borderColor = themeConfig.borderColor
+    val textColor = themeConfig.textColor
+    val mutedColor = themeConfig.mutedTextColor
+    val accentColor = themeConfig.accentColor
+    val fontSizeSp = themeConfig.fontSizeSp
 
     Scaffold(
-        containerColor = ObsidianBlack,
+        containerColor = bgColor,
         topBar = {
-            TerminalTopBar(
-                viewModel = viewModel,
-                uiState = uiState,
+            MinimalTerminalHeader(
+                currentDirectory = currentDirectory,
                 isRootActive = isRootActive,
-                onCopyAll = {
-                    val plainAll = orderedLogs.joinToString("") { it.message }
-                    clipboardManager.setText(AnnotatedString(plainAll))
-                    Toast.makeText(context, "Output copied", Toast.LENGTH_SHORT).show()
+                surfaceColor = surfaceColor,
+                borderColor = borderColor,
+                textColor = textColor,
+                mutedColor = mutedColor,
+                accentColor = accentColor,
+                onToggleRoot = { viewModel.onEvent(TerminalUiEvent.ToggleRoot) },
+                onOpenMenu = {
+                    selectedLineText = null
+                    showContextDialog = true
                 }
             )
         }
@@ -156,45 +175,65 @@ fun Terminal(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .background(ObsidianBlack)
+                .background(bgColor)
                 .padding(paddingValues)
                 .imePadding()
+                .navigationBarsPadding()
         ) {
-            SessionStatusStrip(
-                currentDirectory = currentDirectory,
-                isRootActive = isRootActive,
-                lineCount = orderedLogs.size,
-                onClearLogs = { viewModel.onEvent(TerminalUiEvent.ClearOutput) }
-            )
-
-            HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
-
+            // Main terminal output area; long-press anywhere opens terminal context options
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .background(ObsidianBlack)
+                    .combinedClickable(
+                        onClick = { runCatching { inputFocusRequester.requestFocus() } },
+                        onLongClick = {
+                            selectedLineText = null
+                            showContextDialog = true
+                        }
+                    )
             ) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(1.dp)
-                ) {
-                    itemsIndexed(
-                        items = orderedLogs,
-                        key = { index, _ -> index }
-                    ) { _, log ->
-                        LogLineItem(
-                            log = log,
-                            fontSizeSp = fontSizeSp,
-                            defaultSuccessColor = customSuccessColor,
-                            defaultErrorColor = customErrorColor,
-                            onCopyLine = { text ->
-                                clipboardManager.setText(AnnotatedString(text))
-                                Toast.makeText(context, "Line copied", Toast.LENGTH_SHORT).show()
-                            }
+                if (orderedLogs.isEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.Top
+                    ) {
+                        Text(
+                            text = if (isRootActive) "root@android:$currentDirectory #" else "shell@android:$currentDirectory $",
+                            color = mutedColor,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = fontSizeSp.sp
                         )
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                    ) {
+                        itemsIndexed(
+                            items = orderedLogs,
+                            key = { index, _ -> index }
+                        ) { _, log ->
+                            TerminalOutputLine(
+                                log = log,
+                                fontSizeSp = fontSizeSp,
+                                bgColor = bgColor,
+                                textColor = textColor,
+                                mutedColor = mutedColor,
+                                accentColor = accentColor,
+                                onTapLine = {
+                                    runCatching { inputFocusRequester.requestFocus() }
+                                },
+                                onLongPressLine = { lineText ->
+                                    selectedLineText = lineText
+                                    showContextDialog = true
+                                }
+                            )
+                        }
                     }
                 }
 
@@ -205,501 +244,760 @@ fun Terminal(
                                 listState.scrollToItem(orderedLogs.lastIndex)
                             }
                         },
+                        color = surfaceColor,
+                        border = BorderStroke(1.dp, accentColor),
+                        shape = RoundedCornerShape(4.dp),
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(12.dp),
-                        color = ObsidianElevated,
-                        border = BorderStroke(1.dp, CrimsonRed),
-                        shape = RoundedCornerShape(4.dp)
+                            .padding(12.dp)
+                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        Box(
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Icon(
                                 imageVector = Icons.Rounded.ArrowDownward,
-                                contentDescription = "Scroll to Bottom",
-                                tint = CrimsonRed,
-                                modifier = Modifier.size(14.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "TAIL",
-                                color = CrimsonRed,
-                                fontFamily = FontFamily.Monospace,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
+                                contentDescription = "Scroll to bottom",
+                                tint = accentColor,
+                                modifier = Modifier.size(18.dp)
                             )
                         }
                     }
                 }
             }
 
-            HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
-
-            QuickKeysRow(
-                onInterrupt = { viewModel.onEvent(TerminalUiEvent.Terminate) },
-                onInsert = { token ->
-                    viewModel.onEvent(TerminalUiEvent.OnCommandChange(uiState.command + token))
-                },
-                onQuickExecute = { cmd ->
-                    viewModel.onEvent(TerminalUiEvent.OnCommandChange(cmd))
-                    viewModel.onEvent(TerminalUiEvent.Execute)
-                }
-            )
-
-            HorizontalDivider(thickness = 1.dp, color = ObsidianBorder)
-
-            PromptInputRow(
+            // Inline terminal prompt (submits strictly via keyboard Enter/Send, no Play button)
+            InlinePromptBar(
                 command = uiState.command,
                 isRootActive = isRootActive,
-                isRunning = uiState.executionState == TerminalState.Running,
                 fontSizeSp = fontSizeSp,
+                bgColor = bgColor,
+                borderColor = borderColor,
+                textColor = textColor,
+                mutedColor = mutedColor,
+                accentColor = accentColor,
+                focusRequester = inputFocusRequester,
                 onCommandChange = { viewModel.onEvent(TerminalUiEvent.OnCommandChange(it)) },
-                onExecute = { viewModel.onEvent(TerminalUiEvent.Execute) }
+                onSubmit = { viewModel.executeWithContext(context) }
+            )
+
+            // Terminal hardware-style shortcut strip
+            TerminalShortcutStrip(
+                surfaceColor = surfaceColor,
+                borderColor = borderColor,
+                textColor = textColor,
+                accentColor = accentColor,
+                onInterrupt = { viewModel.onEvent(TerminalUiEvent.Terminate) },
+                onInsertToken = { token ->
+                    viewModel.onEvent(TerminalUiEvent.OnCommandChange(uiState.command + token))
+                    runCatching { inputFocusRequester.requestFocus() }
+                },
+                onClear = { viewModel.onEvent(TerminalUiEvent.ClearOutput) }
             )
         }
+    }
+
+    if (showContextDialog) {
+        TerminalContextMenuDialog(
+            selectedLineText = selectedLineText,
+            isRootActive = isRootActive,
+            currentFontSize = fontSizeSp,
+            surfaceColor = surfaceColor,
+            textColor = textColor,
+            mutedColor = mutedColor,
+            accentColor = accentColor,
+            onDismiss = { showContextDialog = false },
+            onCopyLine = { line ->
+                clipboardManager.setText(AnnotatedString(line))
+                Toast.makeText(context, "Line copied", Toast.LENGTH_SHORT).show()
+                showContextDialog = false
+            },
+            onCopyAll = {
+                val plainAll = orderedLogs.joinToString("") { it.message }
+                clipboardManager.setText(AnnotatedString(plainAll))
+                Toast.makeText(context, "All output copied", Toast.LENGTH_SHORT).show()
+                showContextDialog = false
+            },
+            onClear = {
+                viewModel.onEvent(TerminalUiEvent.ClearOutput)
+                showContextDialog = false
+            },
+            onToggleRoot = {
+                viewModel.onEvent(TerminalUiEvent.ToggleRoot)
+                showContextDialog = false
+            },
+            onRestart = {
+                viewModel.restartSession()
+                showContextDialog = false
+            },
+            onChangeFontSize = { delta ->
+                viewModel.themeStore.updateTheme(
+                    themeConfig.copy(fontSizeSp = themeConfig.fontSizeSp + delta)
+                )
+            },
+            onOpenThemeCustomizer = {
+                showContextDialog = false
+                showThemeDialog = true
+            },
+            onStoragePermission = {
+                showContextDialog = false
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
+                ).apply {
+                    data = "package:${context.packageName}".toUri()
+                }
+                context.startActivity(intent)
+            },
+            onExitApp = {
+                showContextDialog = false
+                viewModel.exitAndKillApp(context)
+            }
+        )
+    }
+
+    if (showThemeDialog) {
+        ThemeCustomizerDialog(
+            currentTheme = themeConfig,
+            onDismiss = { showThemeDialog = false },
+            onApplyTheme = { updated ->
+                viewModel.themeStore.updateTheme(updated)
+                showThemeDialog = false
+            }
+        )
     }
 }
 
 @Composable
-private fun SessionStatusStrip(
+private fun MinimalTerminalHeader(
     currentDirectory: String,
     isRootActive: Boolean,
-    lineCount: Int,
-    onClearLogs: () -> Unit
+    surfaceColor: Color,
+    borderColor: Color,
+    textColor: Color,
+    mutedColor: Color,
+    accentColor: Color,
+    onToggleRoot: () -> Unit,
+    onOpenMenu: () -> Unit
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(ObsidianSurface)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .background(surfaceColor)
+            .statusBarsPadding()
     ) {
-        Box(
+        Row(
             modifier = Modifier
-                .background(
-                    color = if (isRootActive) CrimsonSubtle else ObsidianElevated,
-                    shape = RoundedCornerShape(3.dp)
-                )
-                .border(
-                    width = 1.dp,
-                    color = if (isRootActive) CrimsonRed else ObsidianBorder,
-                    shape = RoundedCornerShape(3.dp)
-                )
-                .padding(horizontal = 6.dp, vertical = 2.dp)
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .border(1.dp, if (isRootActive) accentColor else borderColor, RoundedCornerShape(4.dp))
+                    .clickable(role = Role.Button, onClick = onToggleRoot)
+                    .semantics { contentDescription = "Toggle root or user shell" }
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (isRootActive) "ROOT #" else "USER $",
+                    color = if (isRootActive) accentColor else textColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
             Text(
-                text = if (isRootActive) "ROOT #" else "SHELL $",
-                color = if (isRootActive) CrimsonRed else TerminalTextMuted,
+                text = currentDirectory,
+                color = mutedColor,
                 fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
+
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .clickable(role = Role.Button, onClick = onOpenMenu)
+                    .semantics { contentDescription = "Terminal options" }
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "OPT",
+                    color = textColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
         }
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Text(
-            text = currentDirectory,
-            color = TerminalTextPrimary,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Text(
-            text = "${lineCount}L",
-            color = TerminalTextMuted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 10.sp
-        )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Box(
-            modifier = Modifier
-                .clickable(onClick = onClearLogs)
-                .padding(4.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.DeleteSweep,
-                contentDescription = "Clear",
-                tint = CrimsonRed,
-                modifier = Modifier.size(16.dp)
-            )
-        }
+        HorizontalDivider(thickness = 1.dp, color = borderColor)
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun LogLineItem(
+private fun TerminalOutputLine(
     log: TerminalLog,
     fontSizeSp: Int,
-    defaultSuccessColor: Color,
-    defaultErrorColor: Color,
-    onCopyLine: (String) -> Unit
+    bgColor: Color,
+    textColor: Color,
+    mutedColor: Color,
+    accentColor: Color,
+    onTapLine: () -> Unit,
+    onLongPressLine: (String) -> Unit
 ) {
-    val baseColor = when (log.state) {
-        TerminalState.Error -> defaultErrorColor
-        else -> defaultSuccessColor
+    val lineColor = when (log.state) {
+        TerminalState.Error -> accentColor
+        TerminalState.Info -> mutedColor
+        else -> textColor
     }
 
-    val parsed = remember(log.message, baseColor) {
+    val cleanMessage = log.message.trimEnd('\n')
+    val parsed = remember(cleanMessage, lineColor, bgColor) {
         AnsiParser.parse(
-            rawText = log.message.trimEnd('\n'),
-            defaultFg = baseColor,
-            defaultBg = ObsidianBlack
+            rawText = cleanMessage,
+            defaultFg = lineColor,
+            defaultBg = bgColor
         )
     }
 
-    Text(
-        text = parsed,
-        style = AnsiParser.terminalTextStyle(
-            fontSizeSp = fontSizeSp,
-            defaultColor = baseColor
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = {},
-                onLongClick = { onCopyLine(parsed.text) }
-            )
-    )
-}
-
-@Composable
-private fun QuickKeysRow(
-    onInterrupt: () -> Unit,
-    onInsert: (String) -> Unit,
-    onQuickExecute: (String) -> Unit
-) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(ObsidianSurface)
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 5.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .combinedClickable(
+                onClick = onTapLine,
+                onLongClick = { onLongPressLine(parsed.text) }
+            ),
+        verticalAlignment = Alignment.Top
     ) {
-        KeyChip(label = "CTRL+C", isAlert = true, onClick = onInterrupt)
-        KeyChip(label = "TAB", onClick = { onInsert("\t") })
-        KeyChip(label = "ls -la", onClick = { onQuickExecute("ls -la --color=always") })
-        KeyChip(label = "pwd", onClick = { onQuickExecute("pwd") })
-        KeyChip(label = "cd ..", onClick = { onQuickExecute("cd .. && pwd") })
-        KeyChip(label = "whoami", onClick = { onQuickExecute("whoami") })
-        KeyChip(label = "clear", onClick = { onQuickExecute("clear") })
+        if (log.state == TerminalState.Error) {
+            Text(
+                text = "[ERR] ",
+                color = accentColor,
+                fontFamily = FontFamily.Monospace,
+                fontSize = (fontSizeSp - 1).sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+        Text(
+            text = parsed,
+            style = AnsiParser.terminalTextStyle(
+                fontSizeSp = fontSizeSp,
+                defaultColor = lineColor
+            ),
+            modifier = Modifier.weight(1f)
+        )
     }
 }
 
 @Composable
-private fun KeyChip(
+private fun InlinePromptBar(
+    command: String,
+    isRootActive: Boolean,
+    fontSizeSp: Int,
+    bgColor: Color,
+    borderColor: Color,
+    textColor: Color,
+    mutedColor: Color,
+    accentColor: Color,
+    focusRequester: FocusRequester,
+    onCommandChange: (String) -> Unit,
+    onSubmit: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(bgColor)
+    ) {
+        HorizontalDivider(thickness = 1.dp, color = borderColor)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .defaultMinSize(minHeight = 48.dp)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (isRootActive) "#" else "$",
+                color = accentColor,
+                fontFamily = FontFamily.Monospace,
+                fontSize = (fontSizeSp + 1).sp,
+                fontWeight = FontWeight.Bold
+            )
+
+            Spacer(modifier = Modifier.width(8.dp))
+
+            Box(modifier = Modifier.weight(1f)) {
+                if (command.isEmpty()) {
+                    Text(
+                        text = "enter command (type exit to close)",
+                        color = mutedColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = fontSizeSp.sp
+                    )
+                }
+                BasicTextField(
+                    value = command,
+                    onValueChange = onCommandChange,
+                    textStyle = AnsiParser.terminalTextStyle(
+                        fontSizeSp = fontSizeSp,
+                        defaultColor = textColor
+                    ),
+                    cursorBrush = SolidColor(accentColor),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        capitalization = KeyboardCapitalization.None,
+                        autoCorrectEnabled = false,
+                        keyboardType = KeyboardType.Ascii,
+                        imeAction = ImeAction.Send
+                    ),
+                    keyboardActions = KeyboardActions(
+                        onSend = { onSubmit() }
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focusRequester)
+                        .onPreviewKeyEvent { keyEvent ->
+                            if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Enter) {
+                                onSubmit()
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                )
+            }
+
+            if (command.isNotEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clickable(role = Role.Button) { onCommandChange("") }
+                        .semantics { contentDescription = "Clear command line" },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = null,
+                        tint = mutedColor,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TerminalShortcutStrip(
+    surfaceColor: Color,
+    borderColor: Color,
+    textColor: Color,
+    accentColor: Color,
+    onInterrupt: () -> Unit,
+    onInsertToken: (String) -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(surfaceColor)
+    ) {
+        HorizontalDivider(thickness = 1.dp, color = borderColor)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ShortcutKey(label = "CTRL+C", isAccent = true, borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onInterrupt)
+            ShortcutKey(label = "TAB", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\t") })
+            ShortcutKey(label = "ESC", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\u001B") })
+            ShortcutKey(label = "|", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("|") })
+            ShortcutKey(label = "/", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("/") })
+            ShortcutKey(label = "-", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("-") })
+            ShortcutKey(label = "~", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("~") })
+            ShortcutKey(label = "CLEAR", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onClear)
+        }
+    }
+}
+
+@Composable
+private fun ShortcutKey(
     label: String,
-    isAlert: Boolean = false,
+    isAccent: Boolean = false,
+    borderColor: Color,
+    textColor: Color,
+    accentColor: Color,
     onClick: () -> Unit
 ) {
     Box(
         modifier = Modifier
-            .background(
-                color = if (isAlert) CrimsonSubtle else ObsidianElevated,
-                shape = RoundedCornerShape(3.dp)
-            )
-            .border(
-                width = 1.dp,
-                color = if (isAlert) CrimsonRed else ObsidianBorder,
-                shape = RoundedCornerShape(3.dp)
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            .clip(RoundedCornerShape(4.dp))
+            .border(1.dp, if (isAccent) accentColor else borderColor, RoundedCornerShape(4.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center
     ) {
         Text(
             text = label,
-            color = if (isAlert) CrimsonRed else TerminalTextPrimary,
+            color = if (isAccent) accentColor else textColor,
             fontFamily = FontFamily.Monospace,
             fontSize = 11.sp,
-            fontWeight = if (isAlert) FontWeight.Bold else FontWeight.Medium
+            fontWeight = FontWeight.Bold
         )
     }
 }
 
 @Composable
-private fun PromptInputRow(
-    command: String,
+private fun TerminalContextMenuDialog(
+    selectedLineText: String?,
     isRootActive: Boolean,
-    isRunning: Boolean,
-    fontSizeSp: Int,
-    onCommandChange: (String) -> Unit,
-    onExecute: () -> Unit
+    currentFontSize: Int,
+    surfaceColor: Color,
+    textColor: Color,
+    mutedColor: Color,
+    accentColor: Color,
+    onDismiss: () -> Unit,
+    onCopyLine: (String) -> Unit,
+    onCopyAll: () -> Unit,
+    onClear: () -> Unit,
+    onToggleRoot: () -> Unit,
+    onRestart: () -> Unit,
+    onChangeFontSize: (Int) -> Unit,
+    onOpenThemeCustomizer: () -> Unit,
+    onStoragePermission: () -> Unit,
+    onExitApp: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = surfaceColor,
+        shape = RoundedCornerShape(12.dp),
+        title = {
+            Text(
+                text = "Terminal Options",
+                color = textColor,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (!selectedLineText.isNullOrBlank()) {
+                    ContextMenuActionRow(
+                        icon = Icons.Rounded.ContentCopy,
+                        label = "Copy selected line",
+                        textColor = textColor,
+                        tint = accentColor,
+                        onClick = { onCopyLine(selectedLineText) }
+                    )
+                }
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.ContentCopy,
+                    label = "Copy all output",
+                    textColor = textColor,
+                    tint = mutedColor,
+                    onClick = onCopyAll
+                )
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.DeleteSweep,
+                    label = "Clear terminal buffer",
+                    textColor = textColor,
+                    tint = mutedColor,
+                    onClick = onClear
+                )
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.Palette,
+                    label = "Customize theme and colors",
+                    textColor = textColor,
+                    tint = accentColor,
+                    onClick = onOpenThemeCustomizer
+                )
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.Terminal,
+                    label = if (isRootActive) "Switch to user shell ($)" else "Switch to root shell (#)",
+                    textColor = textColor,
+                    tint = mutedColor,
+                    onClick = onToggleRoot
+                )
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.Refresh,
+                    label = "Restart shell session",
+                    textColor = textColor,
+                    tint = mutedColor,
+                    onClick = onRestart
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 48.dp)
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "Font size (${currentFontSize}sp)",
+                        color = textColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 13.sp
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(role = Role.Button) { onChangeFontSize(-1) }
+                                .semantics { contentDescription = "Decrease font size" },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("A-", color = textColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        }
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable(role = Role.Button) { onChangeFontSize(1) }
+                                .semantics { contentDescription = "Increase font size" },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("A+", color = textColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (!Environment.isExternalStorageManager()) {
+                    ContextMenuActionRow(
+                        icon = Icons.Rounded.Terminal,
+                        label = "Grant all-files storage access",
+                        textColor = textColor,
+                        tint = mutedColor,
+                        onClick = onStoragePermission
+                    )
+                }
+
+                ContextMenuActionRow(
+                    icon = Icons.Rounded.PowerSettingsNew,
+                    label = "Exit and kill app process",
+                    textColor = accentColor,
+                    tint = accentColor,
+                    onClick = onExitApp
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            ) {
+                Text("Close", color = textColor, fontFamily = FontFamily.Monospace)
+            }
+        }
+    )
+}
+
+@Composable
+private fun ContextMenuActionRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    textColor: Color,
+    tint: Color,
+    onClick: () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(ObsidianSurface)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .defaultMinSize(minHeight = 48.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = if (isRootActive) "#" else "$",
-            color = CrimsonRed,
-            fontFamily = FontFamily.Monospace,
-            fontSize = (fontSizeSp + 2).sp,
-            fontWeight = FontWeight.Bold
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(18.dp)
         )
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        Box(modifier = Modifier.weight(1f)) {
-            if (command.isEmpty()) {
-                Text(
-                    text = "enter command...",
-                    color = TerminalTextMuted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = fontSizeSp.sp
-                )
-            }
-            BasicTextField(
-                value = command,
-                onValueChange = onCommandChange,
-                textStyle = AnsiParser.terminalTextStyle(
-                    fontSizeSp = fontSizeSp,
-                    defaultColor = TerminalTextPrimary
-                ),
-                cursorBrush = SolidColor(CrimsonRed),
-                maxLines = 4,
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrectEnabled = false,
-                    keyboardType = KeyboardType.Ascii,
-                    imeAction = ImeAction.Send
-                ),
-                keyboardActions = KeyboardActions(
-                    onSend = { onExecute() }
-                ),
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-
-        if (command.isNotEmpty()) {
-            Spacer(modifier = Modifier.width(6.dp))
-            Box(
-                modifier = Modifier
-                    .clickable { onCommandChange("") }
-                    .padding(4.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Close,
-                    contentDescription = "Clear Input",
-                    tint = TerminalTextMuted,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.width(6.dp))
-
-        Box(
-            modifier = Modifier
-                .background(CrimsonDim, RoundedCornerShape(4.dp))
-                .border(1.dp, CrimsonRed, RoundedCornerShape(4.dp))
-                .clickable(enabled = !isRunning, onClick = onExecute)
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            if (isRunning) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    color = Color.White,
-                    strokeWidth = 2.dp
-                )
-            } else {
-                Icon(
-                    imageVector = YinIcons.PlayArrow,
-                    contentDescription = "Run",
-                    tint = Color.White,
-                    modifier = Modifier.size(16.dp)
-                )
-            }
-        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Text(
+            text = label,
+            color = textColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp
+        )
     }
 }
 
 @Composable
-private fun TerminalTopBar(
-    viewModel: TerminalViewModel,
-    uiState: TerminalUiState,
-    isRootActive: Boolean,
-    onCopyAll: () -> Unit
+private fun ThemeCustomizerDialog(
+    currentTheme: TerminalThemeConfig,
+    onDismiss: () -> Unit,
+    onApplyTheme: (TerminalThemeConfig) -> Unit
 ) {
-    val uriHandler = LocalUriHandler.current
-    val context = LocalContext.current
+    var presetName by remember { mutableStateOf(currentTheme.presetName) }
+    var bgHex by remember { mutableStateOf(currentTheme.backgroundHex) }
+    var textHex by remember { mutableStateOf(currentTheme.textHex) }
+    var accentHex by remember { mutableStateOf(currentTheme.accentHex) }
 
-    BaseTopBar(actions = {
-        IconButton(onClick = { viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(true)) }) {
-            Icon(
-                imageVector = YinIcons.MoreVert,
-                contentDescription = "Tools",
-                tint = TerminalTextPrimary
+    val previewConfig = TerminalThemeConfig(
+        presetName = presetName,
+        backgroundHex = bgHex,
+        textHex = textHex,
+        accentHex = accentHex,
+        fontSizeSp = currentTheme.fontSizeSp
+    )
+    val ratio = previewConfig.textContrastRatio
+    val ratioFormatted = String.format(Locale.US, "%.2f:1", ratio)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF141418),
+        shape = RoundedCornerShape(12.dp),
+        title = {
+            Text(
+                text = "Customize Terminal Colors",
+                color = Color(0xFFF2F2F5),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold
             )
-        }
-        DropdownMenu(
-            expanded = uiState.isToolsMenuOpen,
-            onDismissRequest = { viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false)) },
-            containerColor = ObsidianElevated,
-            offset = DpOffset(0.dp, 8.dp)
-        ) {
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = if (isRootActive) "Switch to Shell ($)" else "Switch to Root (#)",
-                        color = TerminalTextPrimary,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    viewModel.onEvent(TerminalUiEvent.ToggleRoot)
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = YinIcons.Grass,
-                        contentDescription = "Root",
-                        tint = CrimsonRed
-                    )
-                }
-            )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "Restart session",
-                        color = TerminalTextPrimary,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    viewModel.restartSession()
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.Refresh,
-                        contentDescription = "Restart",
-                        tint = CrimsonRed
-                    )
-                }
-            )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "Terminate process",
-                        color = TerminalTextPrimary,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    viewModel.onEvent(TerminalUiEvent.Terminate)
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = YinIcons.Clear,
-                        contentDescription = "Terminate",
-                        tint = CrimsonRed
-                    )
-                }
-            )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "Copy all output",
-                        color = TerminalTextPrimary,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    onCopyAll()
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Rounded.ContentCopy,
-                        contentDescription = "Copy",
-                        tint = TerminalTextPrimary
-                    )
-                }
-            )
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "Clear output",
-                        color = TerminalTextPrimary,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    viewModel.onEvent(TerminalUiEvent.ClearOutput)
-                },
-                leadingIcon = {
-                    Icon(
-                        imageVector = YinIcons.ClearAll,
-                        contentDescription = "Clear",
-                        tint = TerminalTextMuted
-                    )
-                }
-            )
-            if (!Environment.isExternalStorageManager()) {
-                DropdownMenuItem(
-                    text = {
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Live preview box
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(previewConfig.backgroundColor)
+                        .border(1.dp, previewConfig.accentColor, RoundedCornerShape(6.dp))
+                        .padding(10.dp)
+                ) {
+                    Column {
                         Text(
-                            text = "Storage Permission",
-                            color = TerminalTextPrimary,
-                            fontFamily = FontFamily.Monospace
+                            text = "# ls -la /sdcard",
+                            color = previewConfig.accentColor,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
                         )
-                    },
-                    onClick = {
-                        viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                        val intent = Intent(
-                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION
-                        ).apply {
-                            data = "package:${context.packageName}".toUri()
-                        }
-                        context.startActivity(intent)
-                    },
-                    leadingIcon = {
-                        Icon(
-                            imageVector = YinIcons.Storage,
-                            contentDescription = "Storage Permission",
-                            tint = CrimsonRed
+                        Text(
+                            text = "Contrast ratio: $ratioFormatted (${if (ratio >= 4.5f) "WCAG AA Pass" else "Low Contrast"})",
+                            color = previewConfig.textColor,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 12.sp
                         )
                     }
+                }
+
+                // Built-in verified presets
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    TerminalThemeConfig.Presets.forEach { preset ->
+                        Box(
+                            modifier = Modifier
+                                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(preset.backgroundColor)
+                                .border(1.dp, preset.accentColor, RoundedCornerShape(4.dp))
+                                .clickable(role = Role.Button) {
+                                    presetName = preset.presetName
+                                    bgHex = preset.backgroundHex
+                                    textHex = preset.textHex
+                                    accentHex = preset.accentHex
+                                }
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = preset.presetName,
+                                color = preset.textColor,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                OutlinedTextField(
+                    value = bgHex,
+                    onValueChange = {
+                        presetName = "Custom"
+                        bgHex = it
+                    },
+                    label = { Text("Background Hex (e.g. #0A0A0C)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = textHex,
+                    onValueChange = {
+                        presetName = "Custom"
+                        textHex = it
+                    },
+                    label = { Text("Text Hex (e.g. #F2F2F5)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = accentHex,
+                    onValueChange = {
+                        presetName = "Custom"
+                        accentHex = it
+                    },
+                    label = { Text("Accent Hex (e.g. #F43F5E)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
-            DropdownMenuItem(
-                text = {
-                    Text(
-                        text = "GitHub (Upstream)",
-                        color = TerminalTextMuted,
-                        fontFamily = FontFamily.Monospace
-                    )
-                },
-                onClick = {
-                    viewModel.onEvent(TerminalUiEvent.ToggleToolsMenu(false))
-                    uriHandler.openUri("https://github.com/dedeadend/DTerminal")
-                },
-                leadingIcon = {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_github),
-                        contentDescription = "GitHub",
-                        tint = TerminalTextMuted
-                    )
-                }
-            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onApplyTheme(previewConfig) },
+                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            ) {
+                Text("Apply", color = previewConfig.accentColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+            ) {
+                Text("Cancel", color = Color(0xFFA1A1AA), fontFamily = FontFamily.Monospace)
+            }
         }
-    })
+    )
 }

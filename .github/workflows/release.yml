@@ -23,6 +23,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -32,6 +36,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK 21
         uses: actions/setup-java@v5
@@ -40,40 +45,40 @@ jobs:
           java-version: "21"
           cache: gradle
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
       - name: Resolve version & changelog
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+          INPUT_NOTE: ${{ github.event.inputs.note }}
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
-          git fetch --tags --force
-          LAST_TAG=$(git tag -l "v*.*.*" --sort=-v:refname | head -n 1)
+          set -euo pipefail
 
-          if [ -n "${{ github.event.inputs.version }}" ]; then
-            RAW_VER="${{ github.event.inputs.version }}"
-            VERSION_NAME="${RAW_VER#v}"
+          LAST_TAG=$(git tag -l "v*.*.*" --sort=-v:refname | head -n 1)
+          TRIMMED_VER=$(echo "${INPUT_VERSION:-}" | xargs)
+
+          if [ -n "$TRIMMED_VER" ]; then
+            VERSION_NAME="${TRIMMED_VER#v}"
           elif [ -z "$LAST_TAG" ]; then
             VERSION_NAME="1.0.0"
           else
             CLEAN_TAG="${LAST_TAG#v}"
-            MAJOR=$(echo "$CLEAN_TAG" | cut -d. -f1)
-            MINOR=$(echo "$CLEAN_TAG" | cut -d. -f2)
-            PATCH=$(echo "$CLEAN_TAG" | cut -d. -f3)
+            MAJOR=$(echo "$CLEAN_TAG" | cut -d. -f1 | grep -oE '^[0-9]+' || echo 1)
+            MINOR=$(echo "$CLEAN_TAG" | cut -d. -f2 | grep -oE '^[0-9]+' || echo 0)
+            PATCH=$(echo "$CLEAN_TAG" | cut -d. -f3 | grep -oE '^[0-9]+' || echo 0)
             PATCH=$((PATCH + 1))
             VERSION_NAME="${MAJOR}.${MINOR}.${PATCH}"
           fi
 
           TAG_NAME="v${VERSION_NAME}"
-          VERSION_CODE="${{ github.run_number }}"
+          VERSION_CODE="${RUN_NUMBER}"
 
-          sed -i "s/versionCode = [0-9]*/versionCode = $VERSION_CODE/" app/build.gradle.kts
-          sed -i "s/versionName = \"[^\"]*\"/versionName = \"$VERSION_NAME\"/" app/build.gradle.kts
+          sed -E -i "s/versionCode[[:space:]]*=[[:space:]]*[0-9]+/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
+          sed -E -i "s/versionName[[:space:]]*=[[:space:]]*\"[^\"]*\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
           {
             echo "## Changes"
-            if [ -n "${{ github.event.inputs.note }}" ]; then
-              echo "- ${{ github.event.inputs.note }}"
+            if [ -n "${INPUT_NOTE:-}" ]; then
+              printf -- "- %s\n" "$INPUT_NOTE"
             fi
 
             if [ -n "$LAST_TAG" ]; then
@@ -85,8 +90,8 @@ jobs:
 
             if [ -n "$COMMITS" ]; then
               echo "$COMMITS"
-            elif [ -z "${{ github.event.inputs.note }}" ]; then
-              HEAD_MSG=$(git log -1 --pretty=format:"%s")
+            elif [ -z "${INPUT_NOTE:-}" ]; then
+              HEAD_MSG=$(git log -1 --pretty=format:"%s" || true)
               echo "- ${HEAD_MSG:-Bug fixes and improvements}"
             fi
           } > release_notes.md
@@ -96,10 +101,15 @@ jobs:
 
       - name: Build & sign release APK
         run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          set -euo pipefail
 
-          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --build-cache --parallel --stacktrace
+
+          RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" ! -name "*-unsigned.apk" | head -n 1)
+          if [ -z "$RAW_APK" ]; then
+            RAW_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          fi
           if [ -z "$RAW_APK" ]; then
             echo "Release APK not found."
             exit 1
@@ -107,10 +117,12 @@ jobs:
 
           ANDROID_SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           BUILD_TOOLS=$(ls -d "$ANDROID_SDK/build-tools/"* | sort -V | tail -n 1)
+          KEYSTORE_PATH="$RUNNER_TEMP/release.keystore"
+          ALIGNED_APK="$RUNNER_TEMP/aligned.apk"
           FINAL_APK="$GITHUB_WORKSPACE/YinTerm-${TAG_NAME}-arm64.apk"
 
           keytool -genkeypair -v \
-            -keystore release.keystore \
+            -keystore "$KEYSTORE_PATH" \
             -alias yinterm \
             -keyalg RSA \
             -keysize 2048 \
@@ -119,13 +131,13 @@ jobs:
             -keypass yinterm123 \
             -dname "CN=YinTerm, OU=Mobile, O=YinTerm, L=Pekanbaru, S=Riau, C=ID"
 
-          "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" aligned.apk
+          "$BUILD_TOOLS/zipalign" -p -f 4 "$RAW_APK" "$ALIGNED_APK"
           "$BUILD_TOOLS/apksigner" sign \
-            --ks release.keystore \
+            --ks "$KEYSTORE_PATH" \
             --ks-pass pass:yinterm123 \
             --key-pass pass:yinterm123 \
             --out "$FINAL_APK" \
-            aligned.apk
+            "$ALIGNED_APK"
 
           SHA256=$(sha256sum "$FINAL_APK" | awk '{print $1}')
           {
@@ -139,8 +151,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
           if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-            gh release delete "$TAG_NAME" -y
+            gh release delete "$TAG_NAME" --cleanup-tag -y
           fi
 
           gh release create "$TAG_NAME" "$FINAL_APK" \
