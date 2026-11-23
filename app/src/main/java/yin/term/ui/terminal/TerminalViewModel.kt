@@ -18,7 +18,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.update
@@ -57,16 +56,12 @@ class TerminalViewModel(
             }
         }
 
-        // Keep uiState.isRoot synchronized if the underlying shell falls back to non-root
         viewModelScope.launch {
-            shellManager.isRootActive
-                .distinctUntilChanged()
-                .collect { activeRoot ->
-                    _uiState.update { it.copy(isRoot = activeRoot) }
-                }
+            shellManager.isRootActive.collect { activeRoot ->
+                _uiState.update { it.copy(isRoot = activeRoot) }
+            }
         }
 
-        // LazyColumn renders uiState.logs per row; skip full-buffer AnnotatedString rebuilds to avoid O(N^2) GC churn
         viewModelScope.launch {
             combine(
                 terminalLogRepository.getLogs(),

@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -39,12 +38,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.DeleteSweep
-import androidx.compose.material.icons.rounded.Palette
-import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -77,7 +70,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -180,7 +172,6 @@ fun Terminal(
                 .imePadding()
                 .navigationBarsPadding()
         ) {
-            // Main terminal output area; long-press anywhere opens terminal context options
             Box(
                 modifier = Modifier
                     .weight(1f)
@@ -267,7 +258,6 @@ fun Terminal(
                 }
             }
 
-            // Inline terminal prompt (submits strictly via keyboard Enter/Send, no Play button)
             InlinePromptBar(
                 command = uiState.command,
                 isRootActive = isRootActive,
@@ -282,7 +272,6 @@ fun Terminal(
                 onSubmit = { viewModel.executeWithContext(context) }
             )
 
-            // Terminal hardware-style shortcut strip
             TerminalShortcutStrip(
                 surfaceColor = surfaceColor,
                 borderColor = borderColor,
@@ -558,7 +547,6 @@ private fun InlinePromptBar(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         capitalization = KeyboardCapitalization.None,
-                        autoCorrectEnabled = false,
                         keyboardType = KeyboardType.Ascii,
                         imeAction = ImeAction.Send
                     ),
@@ -705,7 +693,7 @@ private fun TerminalContextMenuDialog(
             ) {
                 if (!selectedLineText.isNullOrBlank()) {
                     ContextMenuActionRow(
-                        icon = Icons.Rounded.ContentCopy,
+                        tag = "[CP]",
                         label = "Copy selected line",
                         textColor = textColor,
                         tint = accentColor,
@@ -713,35 +701,35 @@ private fun TerminalContextMenuDialog(
                     )
                 }
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.ContentCopy,
+                    tag = "[ALL]",
                     label = "Copy all output",
                     textColor = textColor,
                     tint = mutedColor,
                     onClick = onCopyAll
                 )
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.DeleteSweep,
+                    tag = "[CLR]",
                     label = "Clear terminal buffer",
                     textColor = textColor,
                     tint = mutedColor,
                     onClick = onClear
                 )
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.Palette,
+                    tag = "[RGB]",
                     label = "Customize theme and colors",
                     textColor = textColor,
                     tint = accentColor,
                     onClick = onOpenThemeCustomizer
                 )
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.Terminal,
+                    tag = "[SH]",
                     label = if (isRootActive) "Switch to user shell ($)" else "Switch to root shell (#)",
                     textColor = textColor,
                     tint = mutedColor,
                     onClick = onToggleRoot
                 )
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.Refresh,
+                    tag = "[RST]",
                     label = "Restart shell session",
                     textColor = textColor,
                     tint = mutedColor,
@@ -788,7 +776,7 @@ private fun TerminalContextMenuDialog(
 
                 if (!Environment.isExternalStorageManager()) {
                     ContextMenuActionRow(
-                        icon = Icons.Rounded.Terminal,
+                        tag = "[DIR]",
                         label = "Grant all-files storage access",
                         textColor = textColor,
                         tint = mutedColor,
@@ -797,7 +785,7 @@ private fun TerminalContextMenuDialog(
                 }
 
                 ContextMenuActionRow(
-                    icon = Icons.Rounded.PowerSettingsNew,
+                    tag = "[OFF]",
                     label = "Exit and kill app process",
                     textColor = accentColor,
                     tint = accentColor,
@@ -818,7 +806,7 @@ private fun TerminalContextMenuDialog(
 
 @Composable
 private fun ContextMenuActionRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tag: String,
     label: String,
     textColor: Color,
     tint: Color,
@@ -833,11 +821,12 @@ private fun ContextMenuActionRow(
             .padding(horizontal = 6.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = tint,
-            modifier = Modifier.size(18.dp)
+        Text(
+            text = tag,
+            color = tint,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold
         )
         Spacer(modifier = Modifier.width(10.dp))
         Text(
@@ -890,7 +879,6 @@ private fun ThemeCustomizerDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                // Live preview box
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -916,7 +904,6 @@ private fun ThemeCustomizerDialog(
                     }
                 }
 
-                // Built-in verified presets
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
