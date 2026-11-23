@@ -32,9 +32,9 @@ object AnsiParser {
         Color(0xFFFFFFFF)  // 15: Bright White
     )
 
-    private val CsiSequenceRegex = Regex("\u001B\\[([0-9:;?]*)([ -/]*[@-~])") private val OscSequenceRegex = Regex("\u001B\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)")
-    // Strips non-CSI VT100 sequences such as ESC(B (charset reset) emitted by tput/ls
-    private val Vt100SingleEscRegex = Regex("\u001B(?:\\([0-9A-Za-z]\vert{}\\)[0-9A-Za-z]|[=>78DMEHc])")
+    private val CsiSequenceRegex = Regex("""\u001B\[([0-9:;?]*)([ -/]*[@-~])""")
+    private val OscSequenceRegex = Regex("""\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)""")
+    private val Vt100SingleEscRegex = Regex("""\u001B(?:\([0-9A-Za-z]|\)[0-9A-Za-z]|[=>78DMEHc])""")
 
     private data class AnsiStyleState(
         var fg: Color,

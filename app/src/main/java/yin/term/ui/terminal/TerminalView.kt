@@ -15,6 +15,7 @@ import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -174,7 +175,6 @@ fun Terminal(
     val accentColor = themeConfig.accentColor
     val fontSizeSp = themeConfig.fontSizeSp
 
-    // Unified full-screen terminal canvas with zero middle borders
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -206,7 +206,7 @@ fun Terminal(
             }
         )
 
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
@@ -218,6 +218,15 @@ fun Terminal(
                     }
                 )
         ) {
+            val charWidthDp = fontSizeSp * 0.6f
+            val lineHeightDp = (fontSizeSp + 4).toFloat()
+            val cols = ((maxWidth.value - 24f) / charWidthDp).toInt().coerceIn(24, 240)
+            val rows = ((maxHeight.value - 12f) / lineHeightDp).toInt().coerceIn(8, 120)
+
+            LaunchedEffect(rows, cols) {
+                viewModel.updateTerminalSize(rows, cols)
+            }
+
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
@@ -244,7 +253,6 @@ fun Terminal(
                     )
                 }
 
-                // Inline prompt flows seamlessly at the end of output without middle dividers
                 item(key = "active_inline_prompt") {
                     InlineTerminalPrompt(
                         command = uiState.command,
@@ -456,7 +464,6 @@ private fun TerminalOutputLine(
     }
 
     val cleanMessage = log.message.trimEnd('\n')
-    // Render command echoes verbatim; parse ANSI SGR colors only on process output
     val displayText = remember(cleanMessage, baseColor, isCommandEcho) {
         if (isCommandEcho) {
             AnnotatedString(cleanMessage)

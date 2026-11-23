@@ -97,6 +97,10 @@ class TerminalViewModel(
         }
     }
 
+    fun updateTerminalSize(rows: Int, cols: Int) {
+        shellManager.terminalSession.resizeTerminal(rows, cols)
+    }
+
     fun executeWithContext(context: Context) {
         execute(context)
     }
