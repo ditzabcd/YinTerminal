@@ -44,6 +44,7 @@ class TerminalViewModel(
 
     val currentDirectory: StateFlow<String> = shellManager.currentDirectory
     val isRootActive: StateFlow<Boolean> = shellManager.isRootActive
+    val activeShellName: StateFlow<String> = shellManager.terminalSession.activeShellName
 
     init {
         viewModelScope.launch(dispatchers.io) {
@@ -51,7 +52,10 @@ class TerminalViewModel(
             shellManager.initialize(preferRoot = true)
 
             if (settingsRepository.getSystemSettings().first().isFirstBoot) {
-                showCleanShellHeader(shellManager.isRootActive.value)
+                showCleanShellHeader(
+                    isRoot = shellManager.isRootActive.value,
+                    shellName = shellManager.terminalSession.activeShellName.value
+                )
                 settingsRepository.setFirstBootCompleted()
             }
         }
@@ -197,12 +201,12 @@ class TerminalViewModel(
         }
     }
 
-    private suspend fun showCleanShellHeader(isRoot: Boolean) {
-        val shellType = if (isRoot) "root (#)" else "user ($)"
+    private suspend fun showCleanShellHeader(isRoot: Boolean, shellName: String) {
+        val shellType = if (isRoot) "root" else "user"
         terminalLogRepository.addLog(
             TerminalLog(
                 TerminalState.Success,
-                "YinTerm shell ready [$shellType]. Long-press screen for theme and session options.\n"
+                "YinTerm [$shellName:$shellType] ready. Long-press anywhere for options.\n"
             )
         )
     }

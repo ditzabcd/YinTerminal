@@ -10,6 +10,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -20,7 +22,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -40,10 +41,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -67,22 +66,18 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.OffsetMapping
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -96,124 +91,30 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.util.Locale
 
-private val ShellBuiltins = setOf(
-    "cd", "export", "alias", "unalias", "echo", "printf", "source", "eval",
-    "set", "unset", "pwd", "su", "sudo", "clear", "history", "which", "type"
-)
-
-private val DestructiveCommands = setOf(
-    "rm", "dd", "mkfs", "reboot", "shutdown", "kill", "pkill", "killall",
-    "exit", "logout", "quit", "chmod", "chown"
-)
-
-private class ShellSyntaxVisualTransformation(
-    private val defaultColor: Color,
-    private val mutedColor: Color,
-    private val accentColor: Color
-) : VisualTransformation {
-
-    private val commandColor = Color(0xFF4ADE80)
-    private val builtinColor = Color(0xFF38BDF8)
-    private val dangerColor = Color(0xFFF87171)
-    private val flagColor = Color(0xFFFACC15)
-    private val pathVarColor = Color(0xFF67E8F9)
-    private val stringColor = Color(0xFFFDE047)
-
-    override fun filter(text: AnnotatedString): TransformedText {
-        val raw = text.text
-        if (raw.isEmpty()) {
-            return TransformedText(text, OffsetMapping.Identity)
-        }
-
-        val styled = buildAnnotatedString {
-            append(raw)
-            addStyle(SpanStyle(color = defaultColor), 0, raw.length)
-
-            var i = 0
-            var expectCommand = true
-
-            while (i < raw.length) {
-                val ch = raw[i]
-
-                if (ch.isWhitespace()) {
-                    i++
-                    continue
-                }
-
-                // Shell comment until end of line
-                if (ch == '#' && expectCommand) {
-                    addStyle(SpanStyle(color = mutedColor), i, raw.length)
-                    break
-                }
-
-                // Quoted string literal
-                if (ch == '"' || ch == '\'') {
-                    val quote = ch
-                    var end = i + 1
-                    while (end < raw.length) {
-                        if (raw[end] == '\\' && quote == '"' && end + 1 < raw.length) {
-                            end += 2
-                            continue
-                        }
-                        if (raw[end] == quote) {
-                            end++
-                            break
-                        }
-                        end++
+private fun Modifier.pinchToZoom(
+    currentFontSize: Int,
+    onFontSizeChange: (Int) -> Unit
+): Modifier = pointerInput(currentFontSize) {
+    awaitEachGesture {
+        var zoomAccum = 1f
+        do {
+            val event = awaitPointerEvent()
+            val pressedCount = event.changes.count { it.pressed }
+            if (pressedCount >= 2) {
+                val zoomChange = event.calculateZoom()
+                if (zoomChange != 1f) {
+                    zoomAccum *= zoomChange
+                    if (zoomAccum >= 1.12f) {
+                        onFontSizeChange((currentFontSize + 1).coerceIn(9, 26))
+                        zoomAccum = 1f
+                    } else if (zoomAccum <= 0.88f) {
+                        onFontSizeChange((currentFontSize - 1).coerceIn(9, 26))
+                        zoomAccum = 1f
                     }
-                    addStyle(SpanStyle(color = stringColor), i, end)
-                    expectCommand = false
-                    i = end
-                    continue
+                    event.changes.forEach { it.consume() }
                 }
-
-                // Operators and command separators reset command expectation
-                if (ch == '|' || ch == '&' || ch == ';') {
-                    val end = if (i + 1 < raw.length && raw[i + 1] == ch) i + 2 else i + 1
-                    addStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.Bold), i, end)
-                    expectCommand = true
-                    i = end
-                    continue
-                }
-
-                if (ch == '>' || ch == '<') {
-                    val end = if (i + 1 < raw.length && raw[i + 1] == ch) i + 2 else i + 1
-                    addStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.Bold), i, end)
-                    expectCommand = false
-                    i = end
-                    continue
-                }
-
-                // Read contiguous token
-                var end = i
-                while (end < raw.length && !raw[end].isWhitespace() && raw[end] !in charArrayOf('|', '&', ';', '>', '<', '"', '\'')) {
-                    end++
-                }
-                val token = raw.substring(i, end)
-
-                when {
-                    expectCommand -> {
-                        val color = when {
-                            token in DestructiveCommands -> dangerColor
-                            token in ShellBuiltins -> builtinColor
-                            else -> commandColor
-                        }
-                        addStyle(SpanStyle(color = color, fontWeight = FontWeight.Bold), i, end)
-                        expectCommand = false
-                    }
-                    token.startsWith("-") -> {
-                        addStyle(SpanStyle(color = flagColor), i, end)
-                    }
-                    token.startsWith("$") || token.startsWith("/") || token.startsWith("~/") || token.startsWith("./") -> {
-                        addStyle(SpanStyle(color = pathVarColor), i, end)
-                    }
-                }
-
-                i = end
             }
-        }
-
-        return TransformedText(styled, OffsetMapping.Identity)
+        } while (event.changes.any { it.pressed })
     }
 }
 
@@ -226,6 +127,7 @@ fun Terminal(
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val currentDirectory by viewModel.currentDirectory.collectAsStateWithLifecycle()
     val isRootActive by viewModel.isRootActive.collectAsStateWithLifecycle()
+    val activeShellName by viewModel.activeShellName.collectAsStateWithLifecycle()
     val themeConfig by viewModel.themeStore.theme.collectAsStateWithLifecycle()
 
     val clipboardManager = LocalClipboardManager.current
@@ -271,153 +173,122 @@ fun Terminal(
     val mutedColor = themeConfig.mutedTextColor
     val accentColor = themeConfig.accentColor
     val fontSizeSp = themeConfig.fontSizeSp
-    val isRunning = uiState.executionState == TerminalState.Running
 
-    Scaffold(
-        containerColor = bgColor,
-        topBar = {
-            MinimalTerminalHeader(
-                currentDirectory = currentDirectory,
-                isRootActive = isRootActive,
-                isRunning = isRunning,
-                hasLogs = orderedLogs.isNotEmpty(),
-                surfaceColor = surfaceColor,
-                borderColor = borderColor,
-                textColor = textColor,
-                mutedColor = mutedColor,
-                accentColor = accentColor,
-                onToggleRoot = { viewModel.onEvent(TerminalUiEvent.ToggleRoot) },
-                onClear = { viewModel.onEvent(TerminalUiEvent.ClearOutput) },
-                onOpenMenu = {
-                    selectedLineText = null
-                    showContextDialog = true
+    // Unified full-screen terminal canvas with zero middle borders
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(bgColor)
+            .statusBarsPadding()
+            .imePadding()
+            .navigationBarsPadding()
+            .pinchToZoom(
+                currentFontSize = fontSizeSp,
+                onFontSizeChange = { updatedSize ->
+                    viewModel.themeStore.updateTheme(
+                        themeConfig.copy(fontSizeSp = updatedSize)
+                    )
                 }
             )
-        }
-    ) { paddingValues ->
-        Column(
+    ) {
+        MinimalTerminalHeader(
+            currentDirectory = currentDirectory,
+            isRootActive = isRootActive,
+            shellName = activeShellName,
+            borderColor = borderColor,
+            textColor = textColor,
+            mutedColor = mutedColor,
+            accentColor = accentColor,
+            onToggleRoot = { viewModel.onEvent(TerminalUiEvent.ToggleRoot) },
+            onOpenMenu = {
+                selectedLineText = null
+                showContextDialog = true
+            }
+        )
+
+        Box(
             modifier = Modifier
-                .fillMaxSize()
-                .background(bgColor)
-                .padding(paddingValues)
-                .imePadding()
-                .navigationBarsPadding()
+                .weight(1f)
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = { runCatching { inputFocusRequester.requestFocus() } },
+                    onLongClick = {
+                        selectedLineText = null
+                        showContextDialog = true
+                    }
+                )
         ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .combinedClickable(
-                        onClick = { runCatching { inputFocusRequester.requestFocus() } },
-                        onLongClick = {
-                            selectedLineText = null
-                            showContextDialog = true
-                        }
-                    )
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                if (orderedLogs.isEmpty()) {
-                    EmptyShellCanvas(
-                        currentDirectory = currentDirectory,
-                        isRootActive = isRootActive,
-                        surfaceColor = surfaceColor,
-                        borderColor = borderColor,
+                itemsIndexed(
+                    items = orderedLogs,
+                    key = { index, _ -> index }
+                ) { _, log ->
+                    TerminalOutputLine(
+                        log = log,
+                        fontSizeSp = fontSizeSp,
                         textColor = textColor,
                         mutedColor = mutedColor,
                         accentColor = accentColor,
-                        fontSizeSp = fontSizeSp,
-                        onRunQuick = { cmd ->
-                            viewModel.onEvent(TerminalUiEvent.OnCommandChange(cmd))
-                            viewModel.executeWithContext(context)
+                        onTapLine = {
+                            runCatching { inputFocusRequester.requestFocus() }
+                        },
+                        onLongPressLine = { lineText ->
+                            selectedLineText = lineText
+                            showContextDialog = true
                         }
                     )
-                } else {
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        itemsIndexed(
-                            items = orderedLogs,
-                            key = { index, _ -> index }
-                        ) { _, log ->
-                            TerminalOutputLine(
-                                log = log,
-                                fontSizeSp = fontSizeSp,
-                                bgColor = bgColor,
-                                surfaceColor = surfaceColor,
-                                textColor = textColor,
-                                mutedColor = mutedColor,
-                                accentColor = accentColor,
-                                onTapLine = {
-                                    runCatching { inputFocusRequester.requestFocus() }
-                                },
-                                onLongPressLine = { lineText ->
-                                    selectedLineText = lineText
-                                    showContextDialog = true
-                                }
-                            )
-                        }
-                    }
                 }
 
-                if (!isAtBottom && orderedLogs.isNotEmpty()) {
-                    Surface(
-                        onClick = {
-                            coroutineScope.launch {
-                                listState.scrollToItem(orderedLogs.lastIndex)
-                            }
-                        },
-                        color = surfaceColor,
-                        border = BorderStroke(1.dp, accentColor),
-                        shape = RoundedCornerShape(4.dp),
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(12.dp)
-                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    ) {
-                        Box(
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ArrowDownward,
-                                contentDescription = "Scroll to bottom",
-                                tint = accentColor,
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
+                // Inline prompt flows seamlessly at the end of output without middle dividers
+                item(key = "active_inline_prompt") {
+                    InlineTerminalPrompt(
+                        command = uiState.command,
+                        currentDirectory = currentDirectory,
+                        isRootActive = isRootActive,
+                        fontSizeSp = fontSizeSp,
+                        textColor = textColor,
+                        mutedColor = mutedColor,
+                        accentColor = accentColor,
+                        focusRequester = inputFocusRequester,
+                        onCommandChange = { viewModel.onEvent(TerminalUiEvent.OnCommandChange(it)) },
+                        onSubmit = { viewModel.executeWithContext(context) }
+                    )
                 }
             }
 
-            InlinePromptBar(
-                command = uiState.command,
-                currentDirectory = currentDirectory,
-                isRootActive = isRootActive,
-                fontSizeSp = fontSizeSp,
-                bgColor = bgColor,
-                borderColor = borderColor,
-                textColor = textColor,
-                mutedColor = mutedColor,
-                accentColor = accentColor,
-                focusRequester = inputFocusRequester,
-                onCommandChange = { viewModel.onEvent(TerminalUiEvent.OnCommandChange(it)) },
-                onSubmit = { viewModel.executeWithContext(context) }
-            )
-
-            TerminalShortcutStrip(
-                surfaceColor = surfaceColor,
-                borderColor = borderColor,
-                textColor = textColor,
-                accentColor = accentColor,
-                onInterrupt = { viewModel.onEvent(TerminalUiEvent.Terminate) },
-                onInsertToken = { token ->
-                    viewModel.onEvent(TerminalUiEvent.OnCommandChange(uiState.command + token))
-                    runCatching { inputFocusRequester.requestFocus() }
-                },
-                onClear = { viewModel.onEvent(TerminalUiEvent.ClearOutput) }
-            )
+            if (!isAtBottom && orderedLogs.isNotEmpty()) {
+                Surface(
+                    onClick = {
+                        coroutineScope.launch {
+                            listState.scrollToItem(orderedLogs.lastIndex)
+                        }
+                    },
+                    color = surfaceColor,
+                    border = BorderStroke(1.dp, accentColor),
+                    shape = RoundedCornerShape(4.dp),
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(12.dp)
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                ) {
+                    Box(
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.ArrowDownward,
+                            contentDescription = "Scroll to bottom",
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -431,6 +302,10 @@ fun Terminal(
             mutedColor = mutedColor,
             accentColor = accentColor,
             onDismiss = { showContextDialog = false },
+            onInterrupt = {
+                viewModel.onEvent(TerminalUiEvent.Terminate)
+                showContextDialog = false
+            },
             onCopyLine = { line ->
                 clipboardManager.setText(AnnotatedString(line))
                 Toast.makeText(context, "Line copied", Toast.LENGTH_SHORT).show()
@@ -492,176 +367,71 @@ fun Terminal(
 }
 
 @Composable
-private fun EmptyShellCanvas(
-    currentDirectory: String,
-    isRootActive: Boolean,
-    surfaceColor: Color,
-    borderColor: Color,
-    textColor: Color,
-    mutedColor: Color,
-    accentColor: Color,
-    fontSizeSp: Int,
-    onRunQuick: (String) -> Unit
-) {
-    val quickSamples = listOf(
-        "ls -la --color=always",
-        "uname -a",
-        "id"
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Text(
-            text = if (isRootActive) "root@android:$currentDirectory #" else "shell@android:$currentDirectory $",
-            color = mutedColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = fontSizeSp.sp
-        )
-
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            quickSamples.forEach { sample ->
-                Box(
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(surfaceColor)
-                        .border(1.dp, borderColor, RoundedCornerShape(4.dp))
-                        .clickable(role = Role.Button) { onRunQuick(sample) }
-                        .padding(horizontal = 10.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = sample,
-                        color = textColor,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-
-        Text(
-            text = "ANSI 256 / TrueColor active. Long-press anywhere for colors and options.",
-            color = mutedColor,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp
-        )
-    }
-}
-
-@Composable
 private fun MinimalTerminalHeader(
     currentDirectory: String,
     isRootActive: Boolean,
-    isRunning: Boolean,
-    hasLogs: Boolean,
-    surfaceColor: Color,
+    shellName: String,
     borderColor: Color,
     textColor: Color,
     mutedColor: Color,
     accentColor: Color,
     onToggleRoot: () -> Unit,
-    onClear: () -> Unit,
     onOpenMenu: () -> Unit
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(surfaceColor)
-            .statusBarsPadding()
+            .padding(horizontal = 10.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .border(1.dp, if (isRootActive) accentColor else borderColor, RoundedCornerShape(4.dp))
+                .clickable(role = Role.Button, onClick = onToggleRoot)
+                .semantics { contentDescription = "Toggle root or user shell" }
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .border(1.dp, if (isRootActive) accentColor else borderColor, RoundedCornerShape(4.dp))
-                    .clickable(role = Role.Button, onClick = onToggleRoot)
-                    .semantics { contentDescription = "Toggle root or user shell" }
-                    .padding(horizontal = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = if (isRootActive) "ROOT #" else "USER $",
-                    color = if (isRootActive) accentColor else textColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Spacer(modifier = Modifier.width(10.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = currentDirectory,
-                    color = textColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = if (isRunning) "BUSY | xterm-256color" else "READY | xterm-256color",
-                    color = if (isRunning) accentColor else mutedColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    maxLines = 1
-                )
-            }
-
-            if (hasLogs) {
-                Box(
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .clickable(role = Role.Button, onClick = onClear)
-                        .semantics { contentDescription = "Clear terminal output" }
-                        .padding(horizontal = 8.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "CLR",
-                        color = mutedColor,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            }
-
-            Box(
-                modifier = Modifier
-                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .clickable(role = Role.Button, onClick = onOpenMenu)
-                    .semantics { contentDescription = "Terminal options" }
-                    .padding(horizontal = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "OPT",
-                    color = textColor,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
+            Text(
+                text = if (isRootActive) "$shellName #" else "$shellName $",
+                color = if (isRootActive) accentColor else textColor,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold
+            )
         }
-        HorizontalDivider(thickness = 1.dp, color = borderColor)
+
+        Spacer(modifier = Modifier.width(10.dp))
+
+        Text(
+            text = currentDirectory,
+            color = mutedColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+
+        Box(
+            modifier = Modifier
+                .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .clickable(role = Role.Button, onClick = onOpenMenu)
+                .semantics { contentDescription = "Terminal options" }
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "OPT",
+                color = textColor,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
     }
 }
 
@@ -670,8 +440,6 @@ private fun MinimalTerminalHeader(
 private fun TerminalOutputLine(
     log: TerminalLog,
     fontSizeSp: Int,
-    bgColor: Color,
-    surfaceColor: Color,
     textColor: Color,
     mutedColor: Color,
     accentColor: Color,
@@ -681,38 +449,32 @@ private fun TerminalOutputLine(
     val isCommandEcho = log.state == TerminalState.Info
     val isError = log.state == TerminalState.Error
 
-    val lineColor = when {
+    val baseColor = when {
         isError -> accentColor
-        isCommandEcho -> textColor
+        isCommandEcho -> mutedColor
         else -> textColor
     }
 
     val cleanMessage = log.message.trimEnd('\n')
-    val parsed = remember(cleanMessage, lineColor, bgColor) {
-        AnsiParser.parse(
-            rawText = cleanMessage,
-            defaultFg = lineColor,
-            defaultBg = Color.Unspecified
-        )
+    // Render command echoes verbatim; parse ANSI SGR colors only on process output
+    val displayText = remember(cleanMessage, baseColor, isCommandEcho) {
+        if (isCommandEcho) {
+            AnnotatedString(cleanMessage)
+        } else {
+            AnsiParser.parse(
+                rawText = cleanMessage,
+                defaultFg = baseColor,
+                defaultBg = Color.Unspecified
+            )
+        }
     }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (isCommandEcho) {
-                    Modifier
-                        .padding(top = 4.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(surfaceColor.copy(alpha = 0.65f))
-                        .padding(horizontal = 6.dp, vertical = 3.dp)
-                } else {
-                    Modifier
-                }
-            )
             .combinedClickable(
                 onClick = onTapLine,
-                onLongClick = { onLongPressLine(parsed.text) }
+                onLongClick = { onLongPressLine(displayText.text) }
             ),
         verticalAlignment = Alignment.Top
     ) {
@@ -726,12 +488,10 @@ private fun TerminalOutputLine(
             )
         }
         Text(
-            text = parsed,
+            text = displayText,
             style = AnsiParser.terminalTextStyle(
                 fontSizeSp = fontSizeSp,
-                defaultColor = lineColor
-            ).copy(
-                fontWeight = if (isCommandEcho) FontWeight.SemiBold else FontWeight.Normal
+                defaultColor = baseColor
             ),
             modifier = Modifier.weight(1f)
         )
@@ -739,13 +499,11 @@ private fun TerminalOutputLine(
 }
 
 @Composable
-private fun InlinePromptBar(
+private fun InlineTerminalPrompt(
     command: String,
     currentDirectory: String,
     isRootActive: Boolean,
     fontSizeSp: Int,
-    bgColor: Color,
-    borderColor: Color,
     textColor: Color,
     mutedColor: Color,
     accentColor: Color,
@@ -756,161 +514,72 @@ private fun InlinePromptBar(
     val dirLabel = remember(currentDirectory) {
         if (currentDirectory == "/") "/" else currentDirectory.substringAfterLast('/').ifEmpty { "/" }
     }
-    val syntaxTransformation = remember(textColor, mutedColor, accentColor) {
-        ShellSyntaxVisualTransformation(
-            defaultColor = textColor,
-            mutedColor = mutedColor,
-            accentColor = accentColor
-        )
-    }
 
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(bgColor)
-    ) {
-        HorizontalDivider(thickness = 1.dp, color = borderColor)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .defaultMinSize(minHeight = 48.dp)
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "$dirLabel ${if (isRootActive) "#" else "$"}",
-                color = accentColor,
-                fontFamily = FontFamily.Monospace,
-                fontSize = fontSizeSp.sp,
-                fontWeight = FontWeight.Bold
-            )
-
-            Spacer(modifier = Modifier.width(8.dp))
-
-            Box(modifier = Modifier.weight(1f)) {
-                if (command.isEmpty()) {
-                    Text(
-                        text = "type command...",
-                        color = mutedColor,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = fontSizeSp.sp
-                    )
-                }
-                BasicTextField(
-                    value = command,
-                    onValueChange = onCommandChange,
-                    textStyle = AnsiParser.terminalTextStyle(
-                        fontSizeSp = fontSizeSp,
-                        defaultColor = textColor
-                    ),
-                    visualTransformation = syntaxTransformation,
-                    cursorBrush = SolidColor(accentColor),
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        capitalization = KeyboardCapitalization.None,
-                        keyboardType = KeyboardType.Ascii,
-                        imeAction = ImeAction.Send
-                    ),
-                    keyboardActions = KeyboardActions(
-                        onSend = { onSubmit() }
-                    ),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .focusRequester(focusRequester)
-                        .onPreviewKeyEvent { keyEvent ->
-                            if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Enter) {
-                                onSubmit()
-                                true
-                            } else {
-                                false
-                            }
-                        }
-                )
-            }
-
-            if (command.isNotEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        .clickable(role = Role.Button) { onCommandChange("") }
-                        .semantics { contentDescription = "Clear command line" },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Close,
-                        contentDescription = null,
-                        tint = mutedColor,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun TerminalShortcutStrip(
-    surfaceColor: Color,
-    borderColor: Color,
-    textColor: Color,
-    accentColor: Color,
-    onInterrupt: () -> Unit,
-    onInsertToken: (String) -> Unit,
-    onClear: () -> Unit
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(surfaceColor)
-    ) {
-        HorizontalDivider(thickness = 1.dp, color = borderColor)
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            ShortcutKey(label = "CTRL+C", isAccent = true, borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onInterrupt)
-            ShortcutKey(label = "TAB", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\t") })
-            ShortcutKey(label = "ESC", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\u001B") })
-            ShortcutKey(label = "|", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" | ") })
-            ShortcutKey(label = "&&", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" && ") })
-            ShortcutKey(label = "/", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("/") })
-            ShortcutKey(label = "-", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("-") })
-            ShortcutKey(label = "~", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("~") })
-            ShortcutKey(label = ">", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" > ") })
-            ShortcutKey(label = "CLEAR", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onClear)
-        }
-    }
-}
-
-@Composable
-private fun ShortcutKey(
-    label: String,
-    isAccent: Boolean = false,
-    borderColor: Color,
-    textColor: Color,
-    accentColor: Color,
-    onClick: () -> Unit
-) {
-    Box(
-        modifier = Modifier
-            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-            .clip(RoundedCornerShape(4.dp))
-            .border(1.dp, if (isAccent) accentColor else borderColor, RoundedCornerShape(4.dp))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center
+            .defaultMinSize(minHeight = 48.dp)
+            .padding(top = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
-            text = label,
-            color = if (isAccent) accentColor else textColor,
+            text = "$dirLabel ${if (isRootActive) "#" else "$"}",
+            color = accentColor,
             fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
+            fontSize = fontSizeSp.sp,
             fontWeight = FontWeight.Bold
         )
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Box(modifier = Modifier.weight(1f)) {
+            BasicTextField(
+                value = command,
+                onValueChange = onCommandChange,
+                textStyle = AnsiParser.terminalTextStyle(
+                    fontSizeSp = fontSizeSp,
+                    defaultColor = textColor
+                ),
+                cursorBrush = SolidColor(accentColor),
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.None,
+                    keyboardType = KeyboardType.Ascii,
+                    imeAction = ImeAction.Send
+                ),
+                keyboardActions = KeyboardActions(
+                    onSend = { onSubmit() }
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .focusRequester(focusRequester)
+                    .onPreviewKeyEvent { keyEvent ->
+                        if (keyEvent.type == KeyEventType.KeyDown && keyEvent.key == Key.Enter) {
+                            onSubmit()
+                            true
+                        } else {
+                            false
+                        }
+                    }
+            )
+        }
+
+        if (command.isNotEmpty()) {
+            Box(
+                modifier = Modifier
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    .clickable(role = Role.Button) { onCommandChange("") }
+                    .semantics { contentDescription = "Clear command line" },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Close,
+                    contentDescription = null,
+                    tint = mutedColor,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
     }
 }
 
@@ -924,6 +593,7 @@ private fun TerminalContextMenuDialog(
     mutedColor: Color,
     accentColor: Color,
     onDismiss: () -> Unit,
+    onInterrupt: () -> Unit,
     onCopyLine: (String) -> Unit,
     onCopyAll: () -> Unit,
     onClear: () -> Unit,
@@ -954,6 +624,13 @@ private fun TerminalContextMenuDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
+                ContextMenuActionRow(
+                    tag = "[INT]",
+                    label = "Send interrupt (Ctrl+C)",
+                    textColor = accentColor,
+                    tint = accentColor,
+                    onClick = onInterrupt
+                )
                 if (!selectedLineText.isNullOrBlank()) {
                     ContextMenuActionRow(
                         tag = "[CP]",
@@ -1008,7 +685,7 @@ private fun TerminalContextMenuDialog(
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
                     Text(
-                        text = "Font size (${currentFontSize}sp)",
+                        text = "Zoom (${currentFontSize}sp)",
                         color = textColor,
                         fontFamily = FontFamily.Monospace,
                         fontSize = 13.sp
@@ -1019,7 +696,7 @@ private fun TerminalContextMenuDialog(
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable(role = Role.Button) { onChangeFontSize(-1) }
-                                .semantics { contentDescription = "Decrease font size" },
+                                .semantics { contentDescription = "Zoom out text" },
                             contentAlignment = Alignment.Center
                         ) {
                             Text("A-", color = textColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
@@ -1029,7 +706,7 @@ private fun TerminalContextMenuDialog(
                                 .size(48.dp)
                                 .clip(RoundedCornerShape(4.dp))
                                 .clickable(role = Role.Button) { onChangeFontSize(1) }
-                                .semantics { contentDescription = "Increase font size" },
+                                .semantics { contentDescription = "Zoom in text" },
                             contentAlignment = Alignment.Center
                         ) {
                             Text("A+", color = textColor, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)

@@ -13,7 +13,6 @@ import androidx.compose.ui.unit.sp
 
 object AnsiParser {
 
-    // Standard 16-color ANSI palette tuned for legibility on dark terminal canvases
     private val Standard16Palette: Array<Color> = arrayOf(
         Color(0xFF1E1E24), // 0: Black
         Color(0xFFF87171), // 1: Red
@@ -23,7 +22,7 @@ object AnsiParser {
         Color(0xFFC084FC), // 5: Magenta
         Color(0xFF22D3EE), // 6: Cyan
         Color(0xFFE4E4E7), // 7: White
-        Color(0xFF71717A), // 8: Bright Black (Gray)
+        Color(0xFF71717A), // 8: Bright Black
         Color(0xFFFCA5A5), // 9: Bright Red
         Color(0xFF86EFAC), // 10: Bright Green
         Color(0xFFFEF08A), // 11: Bright Yellow
@@ -33,8 +32,9 @@ object AnsiParser {
         Color(0xFFFFFFFF)  // 15: Bright White
     )
 
-    private val CsiSequenceRegex = Regex("\u001B\\[([0-9:;?]*)([ -/]*[@-~])")
-    private val OscSequenceRegex = Regex("\u001B\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)")
+    private val CsiSequenceRegex = Regex("\u001B\\[([0-9:;?]*)([ -/]*[@-~])") private val OscSequenceRegex = Regex("\u001B\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)")
+    // Strips non-CSI VT100 sequences such as ESC(B (charset reset) emitted by tput/ls
+    private val Vt100SingleEscRegex = Regex("\u001B(?:\\([0-9A-Za-z]\vert{}\\)[0-9A-Za-z]|[=>78DMEHc])")
 
     private data class AnsiStyleState(
         var fg: Color,
@@ -99,9 +99,9 @@ object AnsiParser {
     ): AnnotatedString {
         if (rawText.isEmpty()) return AnnotatedString("")
 
-        // Resolve carriage returns (\r) for single-line progress bars and strip OSC title escapes
         val normalized = normalizeCarriageReturns(rawText)
             .replace(OscSequenceRegex, "")
+            .replace(Vt100SingleEscRegex, "")
 
         if (!normalized.contains('\u001B')) {
             return AnnotatedString(normalized)
@@ -123,7 +123,6 @@ object AnsiParser {
                 val paramsRaw = match.groupValues[1]
                 val finalByte = match.groupValues[2]
 
-                // Apply SGR codes ('m'); strip cursor/erase CSI codes cleanly
                 if (finalByte == "m" && !paramsRaw.startsWith("?")) {
                     applySgrCodes(paramsRaw, state, defaultFg)
                 }
@@ -132,10 +131,12 @@ object AnsiParser {
             }
 
             if (cursor < normalized.length) {
-                val tail = normalized.substring(cursor)
-                pushStyle(state.toSpanStyle(defaultBg))
-                append(tail)
-                pop()
+                val tail = normalized.substring(cursor).replace("\u001B", "")
+                if (tail.isNotEmpty()) {
+                    pushStyle(state.toSpanStyle(defaultBg))
+                    append(tail)
+                    pop()
+                }
             }
         }
     }
@@ -148,7 +149,7 @@ object AnsiParser {
             color = defaultColor,
             fontFamily = FontFamily.Monospace,
             fontSize = fontSizeSp.sp,
-            lineHeight = (fontSizeSp + 5).sp,
+            lineHeight = (fontSizeSp + 4).sp,
             fontFeatureSettings = "tnum"
         )
     }
@@ -174,7 +175,6 @@ object AnsiParser {
             return
         }
 
-        // Normalize colon-separated ISO-8613-6 parameters (e.g. 38:2::255:0:128) to semicolons
         val tokens = paramsRaw.replace(':', ';').split(';')
         val codes = IntArray(tokens.size) { idx -> tokens[idx].toIntOrNull() ?: 0 }
 
@@ -197,16 +197,10 @@ object AnsiParser {
                 27 -> state.inverse = false
                 29 -> state.strikethrough = false
                 in 30..37 -> state.fg = Standard16Palette[code - 30]
-                38 -> {
-                    val consumed = parseExtendedColor(codes, i + 1) { color -> state.fg = color }
-                    i += consumed
-                }
+                38 -> i += parseExtendedColor(codes, i + 1) { color -> state.fg = color }
                 39 -> state.fg = defaultFg
                 in 40..47 -> state.bg = Standard16Palette[code - 40]
-                48 -> {
-                    val consumed = parseExtendedColor(codes, i + 1) { color -> state.bg = color }
-                    i += consumed
-                }
+                48 -> i += parseExtendedColor(codes, i + 1) { color -> state.bg = color }
                 49 -> state.bg = Color.Unspecified
                 in 90..97 -> state.fg = Standard16Palette[(code - 90) + 8]
                 in 100..107 -> state.bg = Standard16Palette[(code - 100) + 8]
@@ -224,15 +218,13 @@ object AnsiParser {
         return when (codes[startIndex]) {
             5 -> {
                 if (startIndex + 1 < codes.size) {
-                    val index256 = codes[startIndex + 1].coerceIn(0, 255)
-                    onColorParsed(xterm256ToColor(index256))
+                    onColorParsed(xterm256ToColor(codes[startIndex + 1].coerceIn(0, 255)))
                     2
                 } else {
                     1
                 }
             }
             2 -> {
-                // Support both 38;2;R;G;B and 38:2:CS:R:G:B formats
                 val hasColorSpace = startIndex + 4 < codes.size && codes.size - startIndex >= 5
                 val rIdx = if (hasColorSpace) startIndex + 2 else startIndex + 1
                 if (rIdx + 2 < codes.size) {

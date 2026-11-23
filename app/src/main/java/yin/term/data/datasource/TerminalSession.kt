@@ -39,9 +39,21 @@ class TerminalSession(
 ) {
     companion object {
         private const val PWD_MARKER = "__YINTERM_PWD__:"
+        private const val SHELL_MARKER = "__YINTERM_SH__:"
         private const val STREAM_BUFFER_SIZE = 4096
         private const val FLUSH_INTERVAL_MS = 16L
         const val CRASH_FILE_NAME = "yinterm_crash.txt"
+
+        private val CandidateShells = listOf(
+            "/system/bin/zsh",
+            "/system/xbin/zsh",
+            "/data/adb/modules/zsh/system/bin/zsh",
+            "/system/bin/bash",
+            "/system/xbin/bash",
+            "/sbin/bash",
+            "/data/adb/modules/bash/system/bin/bash",
+            "/system/bin/sh"
+        )
 
         @Volatile
         private var crashHandlerInstalled = false
@@ -81,7 +93,6 @@ class TerminalSession(
     }
 
     private var sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
-    // Strict lock hierarchy: always acquire sessionMutex before writeMutex to prevent deadlocks
     private val sessionMutex = Mutex()
     private val writeMutex = Mutex()
 
@@ -103,6 +114,16 @@ class TerminalSession(
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
+    private val _activeShellName = MutableStateFlow("sh")
+    val activeShellName: StateFlow<String> = _activeShellName.asStateFlow()
+
+    private fun resolveBestShellBinary(): String {
+        return CandidateShells.firstOrNull { path ->
+            val file = File(path)
+            file.exists() && file.canExecute()
+        } ?: "/system/bin/sh"
+    }
+
     suspend fun ensureSessionStarted(preferRoot: Boolean = true) {
         sessionMutex.withLock {
             val existing = shellProcess
@@ -114,12 +135,19 @@ class TerminalSession(
                     sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
                 }
 
+                val bestShell = resolveBestShellBinary()
+                val shellBaseName = File(bestShell).name
                 var spawnedProcess: Process? = null
                 var rootGranted = false
 
                 if (preferRoot) {
+                    val suCmd = when (shellBaseName) {
+                        "zsh" -> arrayOf("su", "-c", "$bestShell -f")
+                        "bash" -> arrayOf("su", "-c", "$bestShell --norc --noprofile")
+                        else -> arrayOf("su")
+                    }
                     val suAttempt = runCatching {
-                        ProcessBuilder("su")
+                        ProcessBuilder(*suCmd)
                             .redirectErrorStream(false)
                             .start()
                     }.getOrNull()
@@ -136,8 +164,13 @@ class TerminalSession(
                 }
 
                 if (spawnedProcess == null) {
+                    val userCmd = when (shellBaseName) {
+                        "zsh" -> arrayOf(bestShell, "-f")
+                        "bash" -> arrayOf(bestShell, "--norc", "--noprofile")
+                        else -> arrayOf("/system/bin/sh")
+                    }
                     spawnedProcess = runCatching {
-                        ProcessBuilder("/system/bin/sh")
+                        ProcessBuilder(*userCmd)
                             .redirectErrorStream(false)
                             .start()
                     }.getOrElse { err ->
@@ -155,17 +188,32 @@ class TerminalSession(
                 shellProcess = spawnedProcess
                 _isRootActive.value = rootGranted
                 _isRunning.value = true
+                _activeShellName.value = shellBaseName
 
                 writeMutex.withLock {
                     stdinWriter = BufferedWriter(
                         OutputStreamWriter(spawnedProcess.outputStream, StandardCharsets.UTF_8)
                     )
+                    // Lightweight custom shell profile with color aliases and mksh echo -e support
                     writeRawLocked(
                         """
                         export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
                         export PATH="/sbin:/system/bin:/system/xbin:/vendor/bin:${'$'}PATH"
+                        alias ls='ls --color=auto' 2>/dev/null
+                        alias ll='ls -la --color=auto' 2>/dev/null
+                        alias grep='grep --color=auto' 2>/dev/null
+                        if [ -z "${'$'}BASH_VERSION" ] && [ -z "${'$'}ZSH_VERSION" ]; then
+                          echo() {
+                            case "${'$'}1" in
+                              -e) shift; printf '%b\n' "${'$'}*" ;;
+                              -ne|-en) shift; printf '%b' "${'$'}*" ;;
+                              -n) shift; printf '%s' "${'$'}*" ;;
+                              *) printf '%s\n' "${'$'}*" ;;
+                            esac
+                          }
+                        fi
                         cd /sdcard 2>/dev/null || cd "${'$'}HOME" 2>/dev/null || cd /
-                        printf '%s%s\n' '$PWD_MARKER' "${'$'}PWD"
+                        printf '%s%s\n%s%s\n' '$PWD_MARKER' "${'$'}PWD" '$SHELL_MARKER' '$shellBaseName'
                         """.trimIndent()
                     )
                 }
@@ -255,7 +303,6 @@ class TerminalSession(
                 return@withContext
             }
 
-            // Target child processes only so the parent interactive shell survives
             val pid = getPid(proc)
             if (pid != -1) {
                 runCatching {
@@ -297,7 +344,6 @@ class TerminalSession(
     }
 
     private suspend fun streamOutput(stream: InputStream, isErrorStream: Boolean) {
-        // InputStreamReader preserves multi-byte UTF-8 sequences split across buffer boundaries
         val reader = InputStreamReader(stream, StandardCharsets.UTF_8)
         val buffer = CharArray(STREAM_BUFFER_SIZE)
         val pendingLine = StringBuilder()
@@ -329,9 +375,10 @@ class TerminalSession(
             if (!isErrorStream) {
                 if (pendingLine.isNotEmpty()) {
                     processStdoutBuffer(pendingLine)
-                    if (pendingLine.isNotEmpty() && !pendingLine.toString().startsWith(PWD_MARKER)) {
+                    val leftover = pendingLine.toString()
+                    if (leftover.isNotEmpty() && !leftover.startsWith(PWD_MARKER) && !leftover.startsWith(SHELL_MARKER)) {
                         terminalLogRepository.addLog(
-                            TerminalLog(TerminalState.Success, pendingLine.toString())
+                            TerminalLog(TerminalState.Success, leftover)
                         )
                     }
                 }
@@ -349,7 +396,12 @@ class TerminalSession(
             val newlineIdx = buffer.indexOf("\n")
             if (newlineIdx == -1) {
                 val current = buffer.toString()
-                if (current.isNotEmpty() && !PWD_MARKER.startsWith(current) && !current.contains(PWD_MARKER)) {
+                if (current.isNotEmpty() &&
+                    !PWD_MARKER.startsWith(current) &&
+                    !SHELL_MARKER.startsWith(current) &&
+                    !current.contains(PWD_MARKER) &&
+                    !current.contains(SHELL_MARKER)
+                ) {
                     batchLines.append(current)
                     buffer.clear()
                 }
@@ -360,17 +412,29 @@ class TerminalSession(
             buffer.delete(0, newlineIdx + 1)
 
             val trimmedLine = lineWithNewline.trimEnd('\r', '\n')
-            val markerIdx = trimmedLine.indexOf(PWD_MARKER)
-            if (markerIdx != -1) {
-                if (markerIdx > 0) {
-                    batchLines.append(trimmedLine.substring(0, markerIdx)).append('\n')
+            val pwdIdx = trimmedLine.indexOf(PWD_MARKER)
+            val shellIdx = trimmedLine.indexOf(SHELL_MARKER)
+
+            when {
+                pwdIdx != -1 -> {
+                    if (pwdIdx > 0) {
+                        batchLines.append(trimmedLine.substring(0, pwdIdx)).append('\n')
+                    }
+                    val newPwd = trimmedLine.substring(pwdIdx + PWD_MARKER.length).trim()
+                    if (newPwd.isNotEmpty()) {
+                        _currentDirectory.value = newPwd
+                    }
                 }
-                val newPwd = trimmedLine.substring(markerIdx + PWD_MARKER.length).trim()
-                if (newPwd.isNotEmpty()) {
-                    _currentDirectory.value = newPwd
+                shellIdx != -1 -> {
+                    if (shellIdx > 0) {
+                        batchLines.append(trimmedLine.substring(0, shellIdx)).append('\n')
+                    }
+                    val detectedShell = trimmedLine.substring(shellIdx + SHELL_MARKER.length).trim()
+                    if (detectedShell.isNotEmpty()) {
+                        _activeShellName.value = detectedShell
+                    }
                 }
-            } else {
-                batchLines.append(lineWithNewline)
+                else -> batchLines.append(lineWithNewline)
             }
         }
 
