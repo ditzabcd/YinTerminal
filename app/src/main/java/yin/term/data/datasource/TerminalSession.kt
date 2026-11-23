@@ -24,6 +24,7 @@ import kotlinx.coroutines.withContext
 import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStream
+import java.io.InputStreamReader
 import java.io.OutputStreamWriter
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -38,7 +39,7 @@ class TerminalSession(
 ) {
     companion object {
         private const val PWD_MARKER = "__YINTERM_PWD__:"
-        private const val STREAM_BUFFER_SIZE = 8192
+        private const val STREAM_BUFFER_SIZE = 4096
         private const val FLUSH_INTERVAL_MS = 16L
         const val CRASH_FILE_NAME = "yinterm_crash.txt"
 
@@ -54,8 +55,7 @@ class TerminalSession(
                     val sw = StringWriter()
                     throwable.printStackTrace(PrintWriter(sw))
                     val trace = "Thread: ${thread.name}\n$sw"
-                    val app = YinTermApp.instance
-                    File(app.filesDir, CRASH_FILE_NAME).writeText(trace)
+                    File(YinTermApp.instance.filesDir, CRASH_FILE_NAME).writeText(trace)
                 }
                 previousHandler?.uncaughtException(thread, throwable)
             }
@@ -81,6 +81,7 @@ class TerminalSession(
     }
 
     private var sessionScope = CoroutineScope(SupervisorJob() + dispatchers.io)
+    // Strict lock hierarchy: always acquire sessionMutex before writeMutex to prevent deadlocks
     private val sessionMutex = Mutex()
     private val writeMutex = Mutex()
 
@@ -155,9 +156,19 @@ class TerminalSession(
                 _isRootActive.value = rootGranted
                 _isRunning.value = true
 
-                stdinWriter = BufferedWriter(
-                    OutputStreamWriter(spawnedProcess.outputStream, StandardCharsets.UTF_8)
-                )
+                writeMutex.withLock {
+                    stdinWriter = BufferedWriter(
+                        OutputStreamWriter(spawnedProcess.outputStream, StandardCharsets.UTF_8)
+                    )
+                    writeRawLocked(
+                        """
+                        export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
+                        export PATH="/sbin:/system/bin:/system/xbin:/vendor/bin:${'$'}PATH"
+                        cd /sdcard 2>/dev/null || cd "${'$'}HOME" 2>/dev/null || cd /
+                        printf '%s%s\n' '$PWD_MARKER' "${'$'}PWD"
+                        """.trimIndent()
+                    )
+                }
 
                 stdoutJob = sessionScope.launch {
                     streamOutput(spawnedProcess.inputStream, isErrorStream = false)
@@ -165,16 +176,6 @@ class TerminalSession(
                 stderrJob = sessionScope.launch {
                     streamOutput(spawnedProcess.errorStream, isErrorStream = true)
                 }
-
-                // Configure clean environment and sync initial working directory
-                writeRawLocked(
-                    """
-                    export TERM=xterm-256color CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
-                    export PATH="/sbin:/system/bin:/system/xbin:/vendor/bin:${'$'}PATH"
-                    cd /sdcard 2>/dev/null || cd "${'$'}HOME" 2>/dev/null || cd /
-                    printf '%s%s\n' '$PWD_MARKER' "${'$'}PWD"
-                    """.trimIndent()
-                )
             }
         }
     }
@@ -208,12 +209,12 @@ class TerminalSession(
             return
         }
 
+        if (shellProcess?.isAlive != true) {
+            ensureSessionStarted(preferRoot)
+        }
+
         withContext(dispatchers.io) {
             writeMutex.withLock {
-                val proc = shellProcess
-                if (proc == null || !proc.isAlive) {
-                    ensureSessionStarted(preferRoot)
-                }
                 val payload = buildString {
                     append(command)
                     append('\n')
@@ -227,14 +228,17 @@ class TerminalSession(
     }
 
     fun isExitCommand(rawCommand: String): Boolean {
-        val token = rawCommand.trim().substringBefore(' ')
+        val firstSegment = rawCommand.trim().substringBefore(';').substringBefore('&').trim()
+        val token = firstSegment.substringBefore(' ')
         return token == "exit" || token == "logout" || token == "quit"
     }
 
     suspend fun shutdownAndKillApp(context: Context? = null) {
-        withContext(dispatchers.io) {
-            destroyInternal()
-            sessionScope.cancel()
+        sessionMutex.withLock {
+            withContext(dispatchers.io) {
+                destroyInternal()
+                sessionScope.cancel()
+            }
         }
         withContext(dispatchers.main) {
             terminateApplicationPermanently(context)
@@ -251,7 +255,7 @@ class TerminalSession(
                 return@withContext
             }
 
-            // Send SIGINT to child processes only so the parent interactive shell survives
+            // Target child processes only so the parent interactive shell survives
             val pid = getPid(proc)
             if (pid != -1) {
                 runCatching {
@@ -260,9 +264,11 @@ class TerminalSession(
                         .waitFor(250, TimeUnit.MILLISECONDS)
                 }
             }
-            runCatching {
-                stdinWriter?.write("\u0003")
-                stdinWriter?.flush()
+            writeMutex.withLock {
+                runCatching {
+                    stdinWriter?.write("\u0003")
+                    stdinWriter?.flush()
+                }
             }
             terminalLogRepository.addLog(
                 TerminalLog(TerminalState.Error, "^C\n")
@@ -285,23 +291,25 @@ class TerminalSession(
             writer.write(script)
             writer.newLine()
             writer.flush()
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             _isRunning.value = false
         }
     }
 
     private suspend fun streamOutput(stream: InputStream, isErrorStream: Boolean) {
-        val buffer = ByteArray(STREAM_BUFFER_SIZE)
+        // InputStreamReader preserves multi-byte UTF-8 sequences split across buffer boundaries
+        val reader = InputStreamReader(stream, StandardCharsets.UTF_8)
+        val buffer = CharArray(STREAM_BUFFER_SIZE)
         val pendingLine = StringBuilder()
         var lastFlushTime = System.currentTimeMillis()
 
         try {
             while (sessionScope.isActive) {
-                val bytesRead = stream.read(buffer)
-                if (bytesRead == -1) break
-                if (bytesRead == 0) continue
+                val charsRead = reader.read(buffer)
+                if (charsRead == -1) break
+                if (charsRead == 0) continue
 
-                val chunk = String(buffer, 0, bytesRead, StandardCharsets.UTF_8)
+                val chunk = String(buffer, 0, charsRead)
 
                 if (isErrorStream) {
                     terminalLogRepository.addLog(
@@ -310,7 +318,7 @@ class TerminalSession(
                 } else {
                     pendingLine.append(chunk)
                     val now = System.currentTimeMillis()
-                    if (now - lastFlushTime >= FLUSH_INTERVAL_MS || pendingLine.contains('\n')) {
+                    if (now - lastFlushTime >= FLUSH_INTERVAL_MS || pendingLine.indexOf("\n") != -1) {
                         processStdoutBuffer(pendingLine)
                         lastFlushTime = now
                     }
@@ -318,10 +326,17 @@ class TerminalSession(
             }
         } catch (_: Exception) {
         } finally {
-            if (!isErrorStream && pendingLine.isNotEmpty()) {
-                val remaining = pendingLine.toString()
-                if (!remaining.startsWith(PWD_MARKER)) {
-                    terminalLogRepository.addLog(TerminalLog(TerminalState.Success, remaining))
+            if (!isErrorStream) {
+                if (pendingLine.isNotEmpty()) {
+                    processStdoutBuffer(pendingLine)
+                    if (pendingLine.isNotEmpty() && !pendingLine.toString().startsWith(PWD_MARKER)) {
+                        terminalLogRepository.addLog(
+                            TerminalLog(TerminalState.Success, pendingLine.toString())
+                        )
+                    }
+                }
+                if (shellProcess?.isAlive != true) {
+                    _isRunning.value = false
                 }
             }
         }
@@ -333,8 +348,9 @@ class TerminalSession(
         while (true) {
             val newlineIdx = buffer.indexOf("\n")
             if (newlineIdx == -1) {
-                if (buffer.isNotEmpty() && !PWD_MARKER.startsWith(buffer.toString()) && !buffer.startsWith(PWD_MARKER)) {
-                    batchLines.append(buffer)
+                val current = buffer.toString()
+                if (current.isNotEmpty() && !PWD_MARKER.startsWith(current) && !current.contains(PWD_MARKER)) {
+                    batchLines.append(current)
                     buffer.clear()
                 }
                 break
@@ -344,8 +360,12 @@ class TerminalSession(
             buffer.delete(0, newlineIdx + 1)
 
             val trimmedLine = lineWithNewline.trimEnd('\r', '\n')
-            if (trimmedLine.startsWith(PWD_MARKER)) {
-                val newPwd = trimmedLine.removePrefix(PWD_MARKER).trim()
+            val markerIdx = trimmedLine.indexOf(PWD_MARKER)
+            if (markerIdx != -1) {
+                if (markerIdx > 0) {
+                    batchLines.append(trimmedLine.substring(0, markerIdx)).append('\n')
+                }
+                val newPwd = trimmedLine.substring(markerIdx + PWD_MARKER.length).trim()
                 if (newPwd.isNotEmpty()) {
                     _currentDirectory.value = newPwd
                 }

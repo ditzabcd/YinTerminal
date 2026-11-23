@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -72,11 +73,16 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -89,6 +95,127 @@ import com.yin.term.domain.model.TerminalState
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import java.util.Locale
+
+private val ShellBuiltins = setOf(
+    "cd", "export", "alias", "unalias", "echo", "printf", "source", "eval",
+    "set", "unset", "pwd", "su", "sudo", "clear", "history", "which", "type"
+)
+
+private val DestructiveCommands = setOf(
+    "rm", "dd", "mkfs", "reboot", "shutdown", "kill", "pkill", "killall",
+    "exit", "logout", "quit", "chmod", "chown"
+)
+
+private class ShellSyntaxVisualTransformation(
+    private val defaultColor: Color,
+    private val mutedColor: Color,
+    private val accentColor: Color
+) : VisualTransformation {
+
+    private val commandColor = Color(0xFF4ADE80)
+    private val builtinColor = Color(0xFF38BDF8)
+    private val dangerColor = Color(0xFFF87171)
+    private val flagColor = Color(0xFFFACC15)
+    private val pathVarColor = Color(0xFF67E8F9)
+    private val stringColor = Color(0xFFFDE047)
+
+    override fun filter(text: AnnotatedString): TransformedText {
+        val raw = text.text
+        if (raw.isEmpty()) {
+            return TransformedText(text, OffsetMapping.Identity)
+        }
+
+        val styled = buildAnnotatedString {
+            append(raw)
+            addStyle(SpanStyle(color = defaultColor), 0, raw.length)
+
+            var i = 0
+            var expectCommand = true
+
+            while (i < raw.length) {
+                val ch = raw[i]
+
+                if (ch.isWhitespace()) {
+                    i++
+                    continue
+                }
+
+                // Shell comment until end of line
+                if (ch == '#' && expectCommand) {
+                    addStyle(SpanStyle(color = mutedColor), i, raw.length)
+                    break
+                }
+
+                // Quoted string literal
+                if (ch == '"' || ch == '\'') {
+                    val quote = ch
+                    var end = i + 1
+                    while (end < raw.length) {
+                        if (raw[end] == '\\' && quote == '"' && end + 1 < raw.length) {
+                            end += 2
+                            continue
+                        }
+                        if (raw[end] == quote) {
+                            end++
+                            break
+                        }
+                        end++
+                    }
+                    addStyle(SpanStyle(color = stringColor), i, end)
+                    expectCommand = false
+                    i = end
+                    continue
+                }
+
+                // Operators and command separators reset command expectation
+                if (ch == '|' || ch == '&' || ch == ';') {
+                    val end = if (i + 1 < raw.length && raw[i + 1] == ch) i + 2 else i + 1
+                    addStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.Bold), i, end)
+                    expectCommand = true
+                    i = end
+                    continue
+                }
+
+                if (ch == '>' || ch == '<') {
+                    val end = if (i + 1 < raw.length && raw[i + 1] == ch) i + 2 else i + 1
+                    addStyle(SpanStyle(color = accentColor, fontWeight = FontWeight.Bold), i, end)
+                    expectCommand = false
+                    i = end
+                    continue
+                }
+
+                // Read contiguous token
+                var end = i
+                while (end < raw.length && !raw[end].isWhitespace() && raw[end] !in charArrayOf('|', '&', ';', '>', '<', '"', '\'')) {
+                    end++
+                }
+                val token = raw.substring(i, end)
+
+                when {
+                    expectCommand -> {
+                        val color = when {
+                            token in DestructiveCommands -> dangerColor
+                            token in ShellBuiltins -> builtinColor
+                            else -> commandColor
+                        }
+                        addStyle(SpanStyle(color = color, fontWeight = FontWeight.Bold), i, end)
+                        expectCommand = false
+                    }
+                    token.startsWith("-") -> {
+                        addStyle(SpanStyle(color = flagColor), i, end)
+                    }
+                    token.startsWith("$") || token.startsWith("/") || token.startsWith("~/") || token.startsWith("./") -> {
+                        addStyle(SpanStyle(color = pathVarColor), i, end)
+                    }
+                }
+
+                i = end
+            }
+        }
+
+        return TransformedText(styled, OffsetMapping.Identity)
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -144,6 +271,7 @@ fun Terminal(
     val mutedColor = themeConfig.mutedTextColor
     val accentColor = themeConfig.accentColor
     val fontSizeSp = themeConfig.fontSizeSp
+    val isRunning = uiState.executionState == TerminalState.Running
 
     Scaffold(
         containerColor = bgColor,
@@ -151,12 +279,15 @@ fun Terminal(
             MinimalTerminalHeader(
                 currentDirectory = currentDirectory,
                 isRootActive = isRootActive,
+                isRunning = isRunning,
+                hasLogs = orderedLogs.isNotEmpty(),
                 surfaceColor = surfaceColor,
                 borderColor = borderColor,
                 textColor = textColor,
                 mutedColor = mutedColor,
                 accentColor = accentColor,
                 onToggleRoot = { viewModel.onEvent(TerminalUiEvent.ToggleRoot) },
+                onClear = { viewModel.onEvent(TerminalUiEvent.ClearOutput) },
                 onOpenMenu = {
                     selectedLineText = null
                     showContextDialog = true
@@ -185,25 +316,26 @@ fun Terminal(
                     )
             ) {
                 if (orderedLogs.isEmpty()) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.Top
-                    ) {
-                        Text(
-                            text = if (isRootActive) "root@android:$currentDirectory #" else "shell@android:$currentDirectory $",
-                            color = mutedColor,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = fontSizeSp.sp
-                        )
-                    }
+                    EmptyShellCanvas(
+                        currentDirectory = currentDirectory,
+                        isRootActive = isRootActive,
+                        surfaceColor = surfaceColor,
+                        borderColor = borderColor,
+                        textColor = textColor,
+                        mutedColor = mutedColor,
+                        accentColor = accentColor,
+                        fontSizeSp = fontSizeSp,
+                        onRunQuick = { cmd ->
+                            viewModel.onEvent(TerminalUiEvent.OnCommandChange(cmd))
+                            viewModel.executeWithContext(context)
+                        }
+                    )
                 } else {
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(3.dp)
                     ) {
                         itemsIndexed(
                             items = orderedLogs,
@@ -213,6 +345,7 @@ fun Terminal(
                                 log = log,
                                 fontSizeSp = fontSizeSp,
                                 bgColor = bgColor,
+                                surfaceColor = surfaceColor,
                                 textColor = textColor,
                                 mutedColor = mutedColor,
                                 accentColor = accentColor,
@@ -260,6 +393,7 @@ fun Terminal(
 
             InlinePromptBar(
                 command = uiState.command,
+                currentDirectory = currentDirectory,
                 isRootActive = isRootActive,
                 fontSizeSp = fontSizeSp,
                 bgColor = bgColor,
@@ -358,7 +492,7 @@ fun Terminal(
 }
 
 @Composable
-private fun MinimalTerminalHeader(
+private fun EmptyShellCanvas(
     currentDirectory: String,
     isRootActive: Boolean,
     surfaceColor: Color,
@@ -366,7 +500,75 @@ private fun MinimalTerminalHeader(
     textColor: Color,
     mutedColor: Color,
     accentColor: Color,
+    fontSizeSp: Int,
+    onRunQuick: (String) -> Unit
+) {
+    val quickSamples = listOf(
+        "ls -la --color=always",
+        "uname -a",
+        "id"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = if (isRootActive) "root@android:$currentDirectory #" else "shell@android:$currentDirectory $",
+            color = mutedColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = fontSizeSp.sp
+        )
+
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            quickSamples.forEach { sample ->
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(surfaceColor)
+                        .border(1.dp, borderColor, RoundedCornerShape(4.dp))
+                        .clickable(role = Role.Button) { onRunQuick(sample) }
+                        .padding(horizontal = 10.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = sample,
+                        color = textColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        }
+
+        Text(
+            text = "ANSI 256 / TrueColor active. Long-press anywhere for colors and options.",
+            color = mutedColor,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 11.sp
+        )
+    }
+}
+
+@Composable
+private fun MinimalTerminalHeader(
+    currentDirectory: String,
+    isRootActive: Boolean,
+    isRunning: Boolean,
+    hasLogs: Boolean,
+    surfaceColor: Color,
+    borderColor: Color,
+    textColor: Color,
+    mutedColor: Color,
+    accentColor: Color,
     onToggleRoot: () -> Unit,
+    onClear: () -> Unit,
     onOpenMenu: () -> Unit
 ) {
     Column(
@@ -402,15 +604,44 @@ private fun MinimalTerminalHeader(
 
             Spacer(modifier = Modifier.width(10.dp))
 
-            Text(
-                text = currentDirectory,
-                color = mutedColor,
-                fontFamily = FontFamily.Monospace,
-                fontSize = 12.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = currentDirectory,
+                    color = textColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = if (isRunning) "BUSY | xterm-256color" else "READY | xterm-256color",
+                    color = if (isRunning) accentColor else mutedColor,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    maxLines = 1
+                )
+            }
+
+            if (hasLogs) {
+                Box(
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable(role = Role.Button, onClick = onClear)
+                        .semantics { contentDescription = "Clear terminal output" }
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "CLR",
+                        color = mutedColor,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            }
 
             Box(
                 modifier = Modifier
@@ -440,15 +671,19 @@ private fun TerminalOutputLine(
     log: TerminalLog,
     fontSizeSp: Int,
     bgColor: Color,
+    surfaceColor: Color,
     textColor: Color,
     mutedColor: Color,
     accentColor: Color,
     onTapLine: () -> Unit,
     onLongPressLine: (String) -> Unit
 ) {
-    val lineColor = when (log.state) {
-        TerminalState.Error -> accentColor
-        TerminalState.Info -> mutedColor
+    val isCommandEcho = log.state == TerminalState.Info
+    val isError = log.state == TerminalState.Error
+
+    val lineColor = when {
+        isError -> accentColor
+        isCommandEcho -> textColor
         else -> textColor
     }
 
@@ -457,20 +692,31 @@ private fun TerminalOutputLine(
         AnsiParser.parse(
             rawText = cleanMessage,
             defaultFg = lineColor,
-            defaultBg = bgColor
+            defaultBg = Color.Unspecified
         )
     }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (isCommandEcho) {
+                    Modifier
+                        .padding(top = 4.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(surfaceColor.copy(alpha = 0.65f))
+                        .padding(horizontal = 6.dp, vertical = 3.dp)
+                } else {
+                    Modifier
+                }
+            )
             .combinedClickable(
                 onClick = onTapLine,
                 onLongClick = { onLongPressLine(parsed.text) }
             ),
         verticalAlignment = Alignment.Top
     ) {
-        if (log.state == TerminalState.Error) {
+        if (isError) {
             Text(
                 text = "[ERR] ",
                 color = accentColor,
@@ -484,6 +730,8 @@ private fun TerminalOutputLine(
             style = AnsiParser.terminalTextStyle(
                 fontSizeSp = fontSizeSp,
                 defaultColor = lineColor
+            ).copy(
+                fontWeight = if (isCommandEcho) FontWeight.SemiBold else FontWeight.Normal
             ),
             modifier = Modifier.weight(1f)
         )
@@ -493,6 +741,7 @@ private fun TerminalOutputLine(
 @Composable
 private fun InlinePromptBar(
     command: String,
+    currentDirectory: String,
     isRootActive: Boolean,
     fontSizeSp: Int,
     bgColor: Color,
@@ -504,6 +753,17 @@ private fun InlinePromptBar(
     onCommandChange: (String) -> Unit,
     onSubmit: () -> Unit
 ) {
+    val dirLabel = remember(currentDirectory) {
+        if (currentDirectory == "/") "/" else currentDirectory.substringAfterLast('/').ifEmpty { "/" }
+    }
+    val syntaxTransformation = remember(textColor, mutedColor, accentColor) {
+        ShellSyntaxVisualTransformation(
+            defaultColor = textColor,
+            mutedColor = mutedColor,
+            accentColor = accentColor
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -518,10 +778,10 @@ private fun InlinePromptBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = if (isRootActive) "#" else "$",
+                text = "$dirLabel ${if (isRootActive) "#" else "$"}",
                 color = accentColor,
                 fontFamily = FontFamily.Monospace,
-                fontSize = (fontSizeSp + 1).sp,
+                fontSize = fontSizeSp.sp,
                 fontWeight = FontWeight.Bold
             )
 
@@ -530,7 +790,7 @@ private fun InlinePromptBar(
             Box(modifier = Modifier.weight(1f)) {
                 if (command.isEmpty()) {
                     Text(
-                        text = "enter command (type exit to close)",
+                        text = "type command...",
                         color = mutedColor,
                         fontFamily = FontFamily.Monospace,
                         fontSize = fontSizeSp.sp
@@ -543,6 +803,7 @@ private fun InlinePromptBar(
                         fontSizeSp = fontSizeSp,
                         defaultColor = textColor
                     ),
+                    visualTransformation = syntaxTransformation,
                     cursorBrush = SolidColor(accentColor),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
@@ -614,10 +875,12 @@ private fun TerminalShortcutStrip(
             ShortcutKey(label = "CTRL+C", isAccent = true, borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onInterrupt)
             ShortcutKey(label = "TAB", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\t") })
             ShortcutKey(label = "ESC", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("\u001B") })
-            ShortcutKey(label = "|", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("|") })
+            ShortcutKey(label = "|", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" | ") })
+            ShortcutKey(label = "&&", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" && ") })
             ShortcutKey(label = "/", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("/") })
             ShortcutKey(label = "-", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("-") })
             ShortcutKey(label = "~", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken("~") })
+            ShortcutKey(label = ">", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = { onInsertToken(" > ") })
             ShortcutKey(label = "CLEAR", borderColor = borderColor, textColor = textColor, accentColor = accentColor, onClick = onClear)
         }
     }
