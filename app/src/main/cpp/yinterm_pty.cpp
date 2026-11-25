@@ -28,7 +28,7 @@ static void setWindowSizeInternal(int masterFd, pid_t pid, int rows, int cols) {
     }
 }
 
-static void configureRawNoEchoTermios(int fd) {
+static void configureNoEchoTermios(int fd) {
     struct termios tios;
     if (tcgetattr(fd, &tios) == 0) {
 #ifdef IUTF8
@@ -74,7 +74,7 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
 
     fcntl(masterFd, F_SETFD, FD_CLOEXEC);
     setWindowSizeInternal(masterFd, -1, rows, cols);
-    configureRawNoEchoTermios(masterFd);
+    configureNoEchoTermios(masterFd);
 
     const char *cmdUtf = env->GetStringUTFChars(cmd, nullptr);
     std::string cmdStr(cmdUtf ? cmdUtf : "/system/bin/sh");
@@ -158,7 +158,7 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
 #ifdef TIOCSCTTY
         ioctl(slaveFd, TIOCSCTTY, 0);
 #endif
-        configureRawNoEchoTermios(slaveFd);
+        configureNoEchoTermios(slaveFd);
 
         dup2(slaveFd, STDIN_FILENO);
         dup2(slaveFd, STDOUT_FILENO);
@@ -167,15 +167,13 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
             close(slaveFd);
         }
 
-        if (!envStrings.empty()) {
-            clearenv();
-            for (const auto &kv : envStrings) {
-                size_t eqPos = kv.find('=');
-                if (eqPos != std::string::npos && eqPos > 0) {
-                    std::string key = kv.substr(0, eqPos);
-                    std::string val = kv.substr(eqPos + 1);
-                    setenv(key.c_str(), val.c_str(), 1);
-                }
+        // Pertahankan environment Android (ANDROID_ROOT, ANDROID_DATA, dll) agar su & binary sistem tidak error
+        for (const auto &kv : envStrings) {
+            size_t eqPos = kv.find('=');
+            if (eqPos != std::string::npos && eqPos > 0) {
+                std::string key = kv.substr(0, eqPos);
+                std::string val = kv.substr(eqPos + 1);
+                setenv(key.c_str(), val.c_str(), 1);
             }
         }
 
