@@ -14,33 +14,30 @@ import androidx.compose.ui.unit.sp
 object AnsiParser {
 
     private val Standard16Palette: Array<Color> = arrayOf(
-        Color(0xFF1E1E24), // 0: Black
-        Color(0xFFF87171), // 1: Red
-        Color(0xFF4ADE80), // 2: Green
-        Color(0xFFFACC15), // 3: Yellow
+        Color(0xFF141418), // 0: Black
+        Color(0xFFEF233C), // 1: Red Dragon
+        Color(0xFF34D399), // 2: Green
+        Color(0xFFFBBF24), // 3: Yellow
         Color(0xFF60A5FA), // 4: Blue
-        Color(0xFFC084FC), // 5: Magenta
+        Color(0xFFF472B6), // 5: Magenta
         Color(0xFF22D3EE), // 6: Cyan
         Color(0xFFE4E4E7), // 7: White
         Color(0xFF71717A), // 8: Bright Black
-        Color(0xFFFCA5A5), // 9: Bright Red
-        Color(0xFF86EFAC), // 10: Bright Green
-        Color(0xFFFEF08A), // 11: Bright Yellow
+        Color(0xFFFF4D6D), // 9: Bright Red Dragon
+        Color(0xFF6EE7B7), // 10: Bright Green
+        Color(0xFFFDE68A), // 11: Bright Yellow
         Color(0xFF93C5FD), // 12: Bright Blue
-        Color(0xFFD8B4FE), // 13: Bright Magenta
+        Color(0xFFF9A8D4), // 13: Bright Magenta
         Color(0xFF67E8F9), // 14: Bright Cyan
         Color(0xFFFFFFFF)  // 15: Bright White
     )
 
-    private val CsiSequenceRegex = Regex("""\u001B\[([0-9:;?]*)([ -/]*[@-~])""")
+    private val CsiSequenceRegex = Regex("""\u001B\[([0-9:;?<=>]*)([ -/]*[@-~])""")
     private val OscSequenceRegex = Regex("""\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)""")
-    private val Vt100SingleEscRegex = Regex("""\u001B(?:\([0-9A-Za-z]|\)[0-9A-Za-z]|[=>78DMEHc])""")
-    private val ControlCharsCleanupRegex = Regex("""[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]""")
+    private val StringEscRegex = Regex("""\u001B[P_^X][^\u001B]*\u001B\\""")
+    private val Vt100SingleEscRegex = Regex("""\u001B(?:\([0-9A-Za-z]|\)[0-9A-Za-z]|[=>78DMEHcNOZ])""")
+    private val ControlCharsCleanupRegex = Regex("""[\u0000-\u0007\u000B-\u001A\u001C-\u001F\u007F]""")
 
-    /**
-     * Memisahkan escape sequence yang terpotong di ujung chunk agar tidak tercetak sebagai teks random.
-     * Mengembalikan Pair(teksSiapRender, sisaIncompleteEscape).
-     */
     fun extractCompleteChunk(rawChunk: String): Pair<String, String> {
         val lastEsc = rawChunk.lastIndexOf('\u001B')
         if (lastEsc == -1) return rawChunk to ""
@@ -56,7 +53,7 @@ object AnsiParser {
             if (!terminated && tail.length < 64) {
                 return rawChunk.substring(0, lastEsc) to tail
             }
-        } else if (second == ']') {
+        } else if (second == ']' || second == 'P' || second == '_' || second == '^') {
             val terminated = tail.contains('\u0007') || tail.contains("\u001B\\")
             if (!terminated && tail.length < 256) {
                 return rawChunk.substring(0, lastEsc) to tail
@@ -91,13 +88,13 @@ object AnsiParser {
             val resolvedBg = if (bg != Color.Unspecified) bg else defaultBg
 
             val effectiveFg = if (inverse) {
-                if (resolvedBg != Color.Unspecified) resolvedBg else Color(0xFF0A0A0C)
+                if (resolvedBg != Color.Unspecified) resolvedBg else Color.Black
             } else {
                 baseFg
             }
 
             val effectiveBg = if (inverse) {
-                if (baseFg != Color.Unspecified) baseFg else Color(0xFFF2F2F5)
+                if (baseFg != Color.Unspecified) baseFg else Color(0xFFF4F4F6)
             } else {
                 bg
             }
@@ -128,8 +125,9 @@ object AnsiParser {
     ): AnnotatedString {
         if (rawText.isEmpty()) return AnnotatedString("")
 
-        val normalized = normalizeCarriageReturns(rawText)
+        val normalized = applyBackspaceAndCarriageReturn(rawText)
             .replace(OscSequenceRegex, "")
+            .replace(StringEscRegex, "")
             .replace(Vt100SingleEscRegex, "")
             .replace(ControlCharsCleanupRegex, "")
 
@@ -155,7 +153,7 @@ object AnsiParser {
                 val paramsRaw = match.groupValues[1]
                 val finalByte = match.groupValues[2]
 
-                if (finalByte == "m" && !paramsRaw.startsWith("?")) {
+                if (finalByte == "m" && paramsRaw.none { it in "?<=>" }) {
                     applySgrCodes(paramsRaw, state, defaultFg)
                 }
 
@@ -186,17 +184,33 @@ object AnsiParser {
         )
     }
 
-    private fun normalizeCarriageReturns(text: String): String {
-        if (!text.contains('\r')) return text
+    private fun applyBackspaceAndCarriageReturn(text: String): String {
+        if (!text.contains('\r') && !text.contains('\u0008')) return text
         val lines = text.split('\n')
-        return lines.joinToString("\n") { line ->
-            val lastCr = line.lastIndexOf('\r')
-            if (lastCr == -1) {
-                line
-            } else if (lastCr == line.lastIndex) {
-                line.substring(0, lastCr)
+        return lines.joinToString("\n") { rawLine ->
+            val afterCr = if (!rawLine.contains('\r')) {
+                rawLine
             } else {
-                line.substring(lastCr + 1)
+                val lastCr = rawLine.lastIndexOf('\r')
+                if (lastCr == rawLine.lastIndex) {
+                    rawLine.substring(0, lastCr)
+                } else {
+                    rawLine.substring(lastCr + 1)
+                }
+            }
+
+            if (!afterCr.contains('\u0008')) {
+                afterCr
+            } else {
+                val sb = StringBuilder(afterCr.length)
+                for (ch in afterCr) {
+                    if (ch == '\u0008') {
+                        if (sb.isNotEmpty()) sb.deleteCharAt(sb.length - 1)
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+                sb.toString()
             }
         }
     }

@@ -11,41 +11,50 @@ import kotlin.math.max
 import kotlin.math.min
 
 data class TerminalThemeConfig(
-    val presetName: String = "Ghostty Obsidian",
-    val backgroundHex: String = "#090A0F",
-    val textHex: String = "#E6E8F0",
-    val accentHex: String = "#38BDF8",
+    val presetName: String = "Black AMOLED Red Dragon",
+    val backgroundHex: String = "#000000",
+    val textHex: String = "#F4F4F6",
+    val accentHex: String = "#EF233C",
     val fontSizeSp: Int = 13,
     val showQuickKeys: Boolean = true
 ) {
     val backgroundColor: Color
-        get() = parseHexColor(backgroundHex, Color(0xFF090A0F))
+        get() = parseHexColor(backgroundHex, Color(0xFF000000))
 
     val textColor: Color
-        get() = parseHexColor(textHex, Color(0xFFE6E8F0))
+        get() = parseHexColor(textHex, Color(0xFFF4F4F6))
 
     val accentColor: Color
-        get() = parseHexColor(accentHex, Color(0xFF38BDF8))
+        get() = parseHexColor(accentHex, Color(0xFFEF233C))
+
+    val secondaryAccentColor: Color
+        get() = lerp(accentColor, Color.White, 0.22f)
 
     val surfaceColor: Color
         get() {
             val bg = backgroundColor
-            val target = if (bg.luminance() < 0.5f) Color.White else Color.Black
-            return lerp(bg, target, 0.055f)
+            return if (bg.luminance() < 0.05f) {
+                Color(0xFF09090B)
+            } else {
+                lerp(bg, Color.White, 0.055f)
+            }
         }
 
     val elevatedSurfaceColor: Color
         get() {
             val bg = backgroundColor
-            val target = if (bg.luminance() < 0.5f) Color.White else Color.Black
-            return lerp(bg, target, 0.095f)
+            return if (bg.luminance() < 0.05f) {
+                Color(0xFF111115)
+            } else {
+                lerp(bg, Color.White, 0.095f)
+            }
         }
 
     val borderColor: Color
-        get() = lerp(backgroundColor, textColor, 0.14f)
+        get() = lerp(surfaceColor, accentColor, 0.24f)
 
     val mutedTextColor: Color
-        get() = lerp(backgroundColor, textColor, 0.58f)
+        get() = lerp(backgroundColor, textColor, 0.56f)
 
     val textContrastRatio: Float
         get() {
@@ -59,16 +68,22 @@ data class TerminalThemeConfig(
     companion object {
         val Presets: List<TerminalThemeConfig> = listOf(
             TerminalThemeConfig(
+                presetName = "Black AMOLED Red Dragon",
+                backgroundHex = "#000000",
+                textHex = "#F4F4F6",
+                accentHex = "#EF233C"
+            ),
+            TerminalThemeConfig(
+                presetName = "Crimson Ember AMOLED",
+                backgroundHex = "#000000",
+                textHex = "#FFE4E6",
+                accentHex = "#FF2A55"
+            ),
+            TerminalThemeConfig(
                 presetName = "Ghostty Obsidian",
                 backgroundHex = "#090A0F",
                 textHex = "#E6E8F0",
                 accentHex = "#38BDF8"
-            ),
-            TerminalThemeConfig(
-                presetName = "Obsidian Crimson",
-                backgroundHex = "#0A0A0C",
-                textHex = "#F2F2F5",
-                accentHex = "#F43F5E"
             ),
             TerminalThemeConfig(
                 presetName = "Catppuccin Mocha",
@@ -77,22 +92,10 @@ data class TerminalThemeConfig(
                 accentHex = "#CBA6F7"
             ),
             TerminalThemeConfig(
-                presetName = "Tokyo Night",
-                backgroundHex = "#16161E",
-                textHex = "#C0CAF5",
-                accentHex = "#7AA2F7"
-            ),
-            TerminalThemeConfig(
-                presetName = "Emerald Matrix",
-                backgroundHex = "#060C09",
+                presetName = "Emerald Matrix AMOLED",
+                backgroundHex = "#000000",
                 textHex = "#DCFCE7",
                 accentHex = "#22C55E"
-            ),
-            TerminalThemeConfig(
-                presetName = "Amber Phosphor",
-                backgroundHex = "#0C0906",
-                textHex = "#FEF3C7",
-                accentHex = "#F59E0B"
             )
         )
 
@@ -117,11 +120,19 @@ class TerminalThemeStore(context: Context) {
     val theme: StateFlow<TerminalThemeConfig> = _theme.asStateFlow()
 
     private fun loadSavedTheme(): TerminalThemeConfig {
+        val savedPreset = prefs.getString("preset_name", "Black AMOLED Red Dragon")
+            ?: "Black AMOLED Red Dragon"
+
+        // Migrate old default Ghostty theme to Black AMOLED Red Dragon automatically
+        if (savedPreset == "Ghostty Obsidian" && !prefs.getBoolean("user_selected_theme", false)) {
+            return TerminalThemeConfig()
+        }
+
         return TerminalThemeConfig(
-            presetName = prefs.getString("preset_name", "Ghostty Obsidian") ?: "Ghostty Obsidian",
-            backgroundHex = prefs.getString("bg_hex", "#090A0F") ?: "#090A0F",
-            textHex = prefs.getString("text_hex", "#E6E8F0") ?: "#E6E8F0",
-            accentHex = prefs.getString("accent_hex", "#38BDF8") ?: "#38BDF8",
+            presetName = savedPreset,
+            backgroundHex = prefs.getString("bg_hex", "#000000") ?: "#000000",
+            textHex = prefs.getString("text_hex", "#F4F4F6") ?: "#F4F4F6",
+            accentHex = prefs.getString("accent_hex", "#EF233C") ?: "#EF233C",
             fontSizeSp = prefs.getInt("font_size", 13).coerceIn(9, 26),
             showQuickKeys = prefs.getBoolean("show_quick_keys", true)
         )
@@ -131,6 +142,7 @@ class TerminalThemeStore(context: Context) {
         val clamped = newConfig.copy(fontSizeSp = newConfig.fontSizeSp.coerceIn(9, 26))
         _theme.value = clamped
         prefs.edit()
+            .putBoolean("user_selected_theme", true)
             .putString("preset_name", clamped.presetName)
             .putString("bg_hex", clamped.backgroundHex)
             .putString("text_hex", clamped.textHex)

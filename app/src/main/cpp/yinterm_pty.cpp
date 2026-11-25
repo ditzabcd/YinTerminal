@@ -19,8 +19,26 @@ static void setWindowSizeInternal(int masterFd, pid_t pid, int rows, int cols) {
     ws.ws_row = static_cast<unsigned short>(rows > 0 ? rows : 24);
     ws.ws_col = static_cast<unsigned short>(cols > 0 ? cols : 80);
     ioctl(masterFd, TIOCSWINSZ, &ws);
-    if (pid > 0) {
+
+    pid_t fgPgrp = tcgetpgrp(masterFd);
+    if (fgPgrp > 0) {
+        kill(-fgPgrp, SIGWINCH);
+    } else if (pid > 0) {
         kill(-pid, SIGWINCH);
+    }
+}
+
+static void configureRawNoEchoTermios(int fd) {
+    struct termios tios;
+    if (tcgetattr(fd, &tios) == 0) {
+#ifdef IUTF8
+        tios.c_iflag |= IUTF8;
+#endif
+        tios.c_iflag &= ~(IXON | IXOFF);
+        tios.c_oflag |= (OPOST | ONLCR);
+        tios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL);
+        tios.c_lflag |= ISIG;
+        tcsetattr(fd, TCSANOW, &tios);
     }
 }
 
@@ -56,17 +74,7 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
 
     fcntl(masterFd, F_SETFD, FD_CLOEXEC);
     setWindowSizeInternal(masterFd, -1, rows, cols);
-
-    struct termios tios;
-    if (tcgetattr(masterFd, &tios) == 0) {
-#ifdef IUTF8
-        tios.c_iflag |= IUTF8;
-#endif
-        tios.c_oflag |= (OPOST | ONLCR);
-        tios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
-        tios.c_lflag |= ISIG;
-        tcsetattr(masterFd, TCSANOW, &tios);
-    }
+    configureRawNoEchoTermios(masterFd);
 
     const char *cmdUtf = env->GetStringUTFChars(cmd, nullptr);
     std::string cmdStr(cmdUtf ? cmdUtf : "/system/bin/sh");
@@ -150,13 +158,7 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
 #ifdef TIOCSCTTY
         ioctl(slaveFd, TIOCSCTTY, 0);
 #endif
-
-        struct termios slaveTios;
-        if (tcgetattr(slaveFd, &slaveTios) == 0) {
-            slaveTios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
-            slaveTios.c_lflag |= ISIG;
-            tcsetattr(slaveFd, TCSANOW, &slaveTios);
-        }
+        configureRawNoEchoTermios(slaveFd);
 
         dup2(slaveFd, STDIN_FILENO);
         dup2(slaveFd, STDOUT_FILENO);
