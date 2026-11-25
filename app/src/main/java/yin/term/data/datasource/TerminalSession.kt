@@ -3,6 +3,7 @@ package com.yin.term.data.datasource
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.system.Os
 import com.yin.term.YinTermApp
 import com.yin.term.core.AnsiParser
 import com.yin.term.core.AppDispatchers
@@ -14,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,10 +46,8 @@ class TerminalSession(
     private val dispatchers: AppDispatchers
 ) {
     companion object {
-        private const val META_START = "\u001E__YIN_META__|"
-        private const val META_END = "\u001F"
         private const val STREAM_BUFFER_SIZE = 4096
-        private const val ROOT_HANDSHAKE_TIMEOUT_MS = 15_000L
+        private const val ROOT_HANDSHAKE_TIMEOUT_MS = 12_000L
         private const val USER_HANDSHAKE_TIMEOUT_MS = 3_000L
         private const val SIGINT_NUM = 2
         private const val SIGKILL_NUM = 9
@@ -55,6 +55,17 @@ class TerminalSession(
 
         private const val FULL_PATH =
             "/debug_ramdisk:/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk"
+
+        private val CandidateSuPaths = listOf(
+            "/system/bin/su",
+            "/debug_ramdisk/su",
+            "/sbin/su",
+            "/system/xbin/su",
+            "/data/adb/ksu/bin/su",
+            "/data/adb/ap/bin/su",
+            "/data/adb/magisk/su",
+            "su"
+        )
 
         private val CandidateShells = listOf(
             "/system/bin/bash",
@@ -64,6 +75,9 @@ class TerminalSession(
             "/system/bin/sh"
         )
 
+        // Matches ONLY actual executed handshake output (numeric UID), NEVER the echoed $(id -u)
+        private val HandshakeRegex = Regex("""__YIN_HS__(\d+)__(/[^\r\n]*)__""")
+        private val AnsiStripRegex = Regex("""\u001B\[[0-9:;?<=>]*[ -/]*[@-~]""")
         private val ShellPromptNoiseRegex = Regex("""^(?:[a-zA-Z0-9_.-]+:)?/[^\s]*\s*[#$]\s*$""")
 
         @Volatile
@@ -126,10 +140,16 @@ class TerminalSession(
     @Volatile
     private var terminalCols = 80
 
-    private val echoSuppressQueue = ConcurrentLinkedQueue<String>()
+    @Volatile
+    private var previousDirectory = "/sdcard"
+
+    @Volatile
+    private var handshakeCompleted = false
 
     @Volatile
     private var handshakeSignal: CompletableDeferred<Boolean>? = null
+
+    private val echoSuppressQueue = ConcurrentLinkedQueue<String>()
 
     private val _currentDirectory = MutableStateFlow("/sdcard")
     val currentDirectory: StateFlow<String> = _currentDirectory.asStateFlow()
@@ -145,6 +165,12 @@ class TerminalSession(
 
     private fun isAlive(): Boolean {
         return ptyProcess != null || (fallbackProcess?.isAlive == true)
+    }
+
+    private fun resolveSuBinary(): String {
+        return CandidateSuPaths.firstOrNull { path ->
+            if (path == "su") true else File(path).exists()
+        } ?: "su"
     }
 
     private fun resolveBestShellBinary(): String {
@@ -186,7 +212,7 @@ class TerminalSession(
 
     suspend fun ensureSessionStarted(preferRoot: Boolean = true) {
         sessionMutex.withLock {
-            if (isAlive()) return
+            if (isAlive() && handshakeCompleted) return
 
             withContext(dispatchers.io) {
                 if (!sessionScope.isActive) {
@@ -194,41 +220,25 @@ class TerminalSession(
                 }
 
                 if (preferRoot) {
-                    // Attempt 1: su -c "exec /system/bin/sh -s" (clean stream mode, zero mksh line-editor echo)
-                    if (startShellAttempt(asRoot = true, useDashC = true)) {
-                        return@withContext
-                    }
-                    // Attempt 2: plain su (for custom su wrappers that reject -c)
-                    if (startShellAttempt(asRoot = true, useDashC = false)) {
+                    if (startShellAttempt(asRoot = true)) {
                         return@withContext
                     }
                     destroyInternal()
-                    terminalLogRepository.addLog(
-                        TerminalLog(
-                            TerminalState.Error,
-                            "Root not granted — running in user shell ($)\n"
-                        )
-                    )
                 }
 
-                if (!startShellAttempt(asRoot = false, useDashC = false)) {
-                    terminalLogRepository.addLog(
-                        TerminalLog(
-                            TerminalState.Error,
-                            "Shell initialization failed.\n"
-                        )
-                    )
-                }
+                startShellAttempt(asRoot = false)
             }
         }
     }
 
-    private suspend fun startShellAttempt(asRoot: Boolean, useDashC: Boolean): Boolean {
+    private suspend fun startShellAttempt(asRoot: Boolean): Boolean {
         destroyInternal()
+        handshakeCompleted = false
 
         val bestShell = resolveBestShellBinary()
         val shellBaseName = File(bestShell).name
-        val nonInteractiveShellCmd = if (shellBaseName == "bash") {
+        val suBin = resolveSuBinary()
+        val nonInteractiveShell = if (shellBaseName == "bash") {
             "$bestShell --norc --noprofile -s"
         } else {
             "/system/bin/sh -s"
@@ -240,13 +250,21 @@ class TerminalSession(
         val deferred = CompletableDeferred<Boolean>()
         handshakeSignal = deferred
 
+        val initCommand =
+            "stty -echo -echoe -echok -echonl 2>/dev/null; " +
+                "export PS1='' PS2='' PROMPT_COMMAND='' TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 PATH='$FULL_PATH:'\"\$PATH\"; " +
+                "alias ls='ls --color=auto' 2>/dev/null; alias ll='ls -la --color=auto' 2>/dev/null; alias grep='grep --color=auto' 2>/dev/null; " +
+                "cd /sdcard 2>/dev/null || cd \"\$HOME\" 2>/dev/null || cd /; " +
+                "echo \"__YIN_HS__\$(id -u)__\$PWD__\""
+
         if (NativePty.isAvailable) {
-            val cmd = if (asRoot) "su" else bestShell
-            val args = when {
-                asRoot && useDashC -> arrayOf("su", "-c", "exec $nonInteractiveShellCmd")
-                asRoot -> arrayOf("su")
-                shellBaseName == "bash" -> arrayOf(bestShell, "--norc", "--noprofile", "-s")
-                else -> arrayOf("/system/bin/sh", "-s")
+            val cmd = if (asRoot) suBin else bestShell
+            val args = if (asRoot) {
+                arrayOf("su")
+            } else if (shellBaseName == "bash") {
+                arrayOf(bestShell, "--norc", "--noprofile", "-s")
+            } else {
+                arrayOf("/system/bin/sh", "-s")
             }
 
             val spawnedPty = NativePty.spawn(
@@ -275,24 +293,29 @@ class TerminalSession(
                 }
 
                 writeMutex.withLock {
-                    if (asRoot && !useDashC) {
-                        writeRawLocked("exec $nonInteractiveShellCmd")
+                    if (asRoot) {
+                        writeRawLocked("stty -echo 2>/dev/null; exec $nonInteractiveShell")
                     }
-                    writeRawLocked(buildSingleLineInit(shellBaseName))
+                    writeRawLocked(initCommand)
                 }
 
                 val timeout = if (asRoot) ROOT_HANDSHAKE_TIMEOUT_MS else USER_HANDSHAKE_TIMEOUT_MS
                 val verified = withTimeoutOrNull(timeout) { deferred.await() } ?: false
-                return verified && isAlive() && (!asRoot || _isRootActive.value)
+                if (verified && isAlive() && (!asRoot || _isRootActive.value)) {
+                    handshakeCompleted = true
+                    return true
+                }
+                return false
             }
         }
 
         // Fallback ProcessBuilder jika PTY diblokir SELinux
-        val fallbackCmd = when {
-            asRoot && useDashC -> arrayOf("su", "-c", "exec $nonInteractiveShellCmd")
-            asRoot -> arrayOf("su")
-            shellBaseName == "bash" -> arrayOf(bestShell, "--norc", "--noprofile", "-s")
-            else -> arrayOf("/system/bin/sh", "-s")
+        val fallbackCmd = if (asRoot) {
+            arrayOf(suBin)
+        } else if (shellBaseName == "bash") {
+            arrayOf(bestShell, "--norc", "--noprofile", "-s")
+        } else {
+            arrayOf("/system/bin/sh", "-s")
         }
 
         val proc = runCatching {
@@ -322,23 +345,19 @@ class TerminalSession(
         }
 
         writeMutex.withLock {
-            if (asRoot && !useDashC) {
-                writeRawLocked("exec $nonInteractiveShellCmd")
+            if (asRoot) {
+                writeRawLocked("stty -echo 2>/dev/null; exec $nonInteractiveShell")
             }
-            writeRawLocked(buildSingleLineInit(shellBaseName))
+            writeRawLocked(initCommand)
         }
 
         val timeout = if (asRoot) ROOT_HANDSHAKE_TIMEOUT_MS else USER_HANDSHAKE_TIMEOUT_MS
         val verified = withTimeoutOrNull(timeout) { deferred.await() } ?: false
-        return verified && isAlive() && (!asRoot || _isRootActive.value)
-    }
-
-    private fun buildSingleLineInit(shellBaseName: String): String {
-        return "stty -echo -echoe -echok -echonl 2>/dev/null; " +
-            "export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8 PS1='' PS2='' PROMPT_COMMAND='' PATH='$FULL_PATH:'\"\$PATH\"; " +
-            "alias ls='ls --color=auto' 2>/dev/null; alias ll='ls -la --color=auto' 2>/dev/null; alias grep='grep --color=auto' 2>/dev/null; " +
-            "cd /sdcard 2>/dev/null || cd \"\$HOME\" 2>/dev/null || cd /; " +
-            "printf '${META_START}%s|%s|%s${META_END}\\n' \"\$(id -u)\" \"\$PWD\" '$shellBaseName'"
+        if (verified && isAlive() && (!asRoot || _isRootActive.value)) {
+            handshakeCompleted = true
+            return true
+        }
+        return false
     }
 
     suspend fun executeCommand(command: String, preferRoot: Boolean = true, context: Context? = null) {
@@ -359,7 +378,11 @@ class TerminalSession(
                 restartSession(preferRoot = true)
                 if (_isRootActive.value) {
                     terminalLogRepository.addLog(
-                        TerminalLog(TerminalState.Success, "Root shell active (#)\n")
+                        TerminalLog(TerminalState.Success, "Root shell granted (#)\n")
+                    )
+                } else {
+                    terminalLogRepository.addLog(
+                        TerminalLog(TerminalState.Error, "su: permission denied (grant root in Magisk/KernelSU)\n")
                     )
                 }
             }
@@ -368,24 +391,58 @@ class TerminalSession(
 
         if (preferRoot != _isRootActive.value && isAlive()) {
             restartSession(preferRoot)
-        } else if (!isAlive()) {
+        } else if (!isAlive() || !handshakeCompleted) {
             ensureSessionStarted(preferRoot)
         }
 
+        // Enqueue exact command so any raw PTY stdin echo is suppressed cleanly
         enqueueEchoSuppression(trimmed)
 
         withContext(dispatchers.io) {
             writeMutex.withLock {
-                val payload = buildString {
-                    append(trimmed)
-                    append('\n')
-                    append("printf '")
-                    append(META_START)
-                    append("%s|%s|%s")
-                    append(META_END)
-                    append("\\n' \"\$(id -u)\" \"\$PWD\" \"${_activeShellName.value}\"")
+                // Pure user command only — zero injected printf or control characters
+                writeRawLocked(trimmed)
+            }
+            delay(35L)
+            refreshWorkingDirectory(trimmed)
+        }
+    }
+
+    private fun refreshWorkingDirectory(executedCommand: String) {
+        // 1. Try out-of-band kernel /proc/<pid>/cwd lookup first (zero PTY traffic)
+        val pid = ptyProcess?.pid ?: -1
+        if (pid > 0) {
+            val procCwd = runCatching { Os.readlink("/proc/$pid/cwd") }.getOrNull()
+            if (!procCwd.isNullOrBlank() && procCwd.startsWith("/")) {
+                if (procCwd != _currentDirectory.value) {
+                    previousDirectory = _currentDirectory.value
+                    _currentDirectory.value = procCwd
                 }
-                writeRawLocked(payload)
+                return
+            }
+        }
+
+        // 2. Fallback path resolver for cd commands when /proc/<root_pid>/cwd is uid=0
+        val segments = executedCommand.split("&&", ";")
+        for (seg in segments) {
+            val part = seg.trim()
+            if (part == "cd" || part.startsWith("cd ")) {
+                val targetRaw = part.removePrefix("cd").trim()
+                    .removeSurrounding("\"")
+                    .removeSurrounding("'")
+                val current = _currentDirectory.value
+                val nextDir = when {
+                    targetRaw.isEmpty() || targetRaw == "~" -> "/sdcard"
+                    targetRaw == "-" -> previousDirectory
+                    targetRaw.startsWith("~/") -> "/sdcard/" + targetRaw.removePrefix("~/")
+                    targetRaw.startsWith("/") -> File(targetRaw).canonicalPath
+                    else -> File(current, targetRaw).canonicalPath
+                }
+                val dirFile = File(nextDir)
+                if (!dirFile.exists() || dirFile.isDirectory) {
+                    previousDirectory = current
+                    _currentDirectory.value = nextDir
+                }
             }
         }
     }
@@ -431,9 +488,6 @@ class TerminalSession(
 
             val proc = fallbackProcess
             if (proc == null || !proc.isAlive) {
-                terminalLogRepository.addLog(
-                    TerminalLog(TerminalState.Error, "No active shell session.\n")
-                )
                 return@withContext
             }
 
@@ -543,11 +597,13 @@ class TerminalSession(
                 if (readyText.isEmpty()) continue
 
                 if (isErrorStream) {
-                    val cleanErr = sanitizeOutputLine(readyText)
-                    if (cleanErr.isNotEmpty()) {
-                        terminalLogRepository.addLog(
-                            TerminalLog(TerminalState.Error, cleanErr)
-                        )
+                    if (handshakeCompleted) {
+                        val cleanErr = sanitizeOutputLine(readyText)
+                        if (cleanErr.isNotEmpty()) {
+                            terminalLogRepository.addLog(
+                                TerminalLog(TerminalState.Error, cleanErr)
+                            )
+                        }
                     }
                 } else {
                     pendingLine.append(readyText)
@@ -565,53 +621,34 @@ class TerminalSession(
         }
     }
 
-    private fun containsInternalArtifact(text: String): Boolean {
-        return text.contains('\u001E') ||
-            text.contains('\u001F') ||
-            text.contains("__YIN_META__") ||
-            text.contains("__YIN_PWD__") ||
-            text.contains("stty -echo") ||
-            text.contains("exec /system/bin/sh") ||
-            text.contains("PROMPT_COMMAND=")
-    }
-
     private fun sanitizeOutputLine(rawLine: String): String {
-        if (containsInternalArtifact(rawLine)) return ""
+        if (rawLine.contains("__YIN_HS__") ||
+            rawLine.contains("stty -echo") ||
+            rawLine.contains("PROMPT_COMMAND=")
+        ) {
+            return ""
+        }
 
-        val stripped = rawLine.trimEnd('\r', '\n').trim()
-        if (stripped.isEmpty()) return rawLine
+        val plainTrimmed = rawLine
+            .replace(AnsiStripRegex, "")
+            .trimEnd('\r', '\n')
+            .trim()
 
-        // Suppress echoed command if a subshell ever echoes stdin
+        if (plainTrimmed.isEmpty()) return rawLine
+
+        // Suppress echoed command if PTY/subshell echoed stdin
         val expectedEcho = echoSuppressQueue.peek()
-        if (expectedEcho != null && stripped == expectedEcho) {
+        if (expectedEcho != null && plainTrimmed == expectedEcho) {
             echoSuppressQueue.poll()
             return ""
         }
 
         // Suppress stray mksh prompts (e.g. ":/storage/emulated/0 $ " or ":/ # ")
-        if (ShellPromptNoiseRegex.matches(stripped)) {
+        if (ShellPromptNoiseRegex.matches(plainTrimmed)) {
             return ""
         }
 
         return rawLine
-    }
-
-    private fun handleMetadataFrame(framePayload: String) {
-        val parts = framePayload.split('|')
-        if (parts.size >= 3) {
-            val uidStr = parts[0].trim()
-            val pwdStr = parts[1].trim()
-            val shStr = parts[2].trim()
-
-            _isRootActive.value = (uidStr == "0")
-            if (pwdStr.startsWith("/")) {
-                _currentDirectory.value = pwdStr
-            }
-            if (shStr.isNotEmpty()) {
-                _activeShellName.value = shStr
-            }
-            handshakeSignal?.complete(true)
-        }
     }
 
     private suspend fun processStdoutBuffer(buffer: StringBuilder, forceFlushPartial: Boolean) {
@@ -620,7 +657,7 @@ class TerminalSession(
         while (true) {
             val newlineIdx = buffer.indexOf("\n")
             if (newlineIdx == -1) {
-                if (forceFlushPartial && buffer.isNotEmpty()) {
+                if (forceFlushPartial && buffer.isNotEmpty() && handshakeCompleted) {
                     val tail = buffer.toString()
                     buffer.clear()
                     val cleaned = sanitizeOutputLine(tail)
@@ -635,24 +672,28 @@ class TerminalSession(
             buffer.delete(0, newlineIdx + 1)
 
             val trimmedLine = lineWithNewline.trimEnd('\r', '\n')
-            val metaStartIdx = trimmedLine.indexOf(META_START)
+            val hsMatch = HandshakeRegex.find(trimmedLine)
 
-            if (metaStartIdx != -1) {
-                if (metaStartIdx > 0) {
-                    val beforeMeta = sanitizeOutputLine(trimmedLine.substring(0, metaStartIdx))
-                    if (beforeMeta.isNotEmpty()) {
-                        batchLines.append(beforeMeta).append('\n')
-                    }
+            if (hsMatch != null) {
+                val uidStr = hsMatch.groupValues[1]
+                val pwdStr = hsMatch.groupValues[2].trim()
+                _isRootActive.value = (uidStr == "0")
+                if (pwdStr.startsWith("/")) {
+                    _currentDirectory.value = pwdStr
+                    previousDirectory = pwdStr
                 }
-                val afterStart = trimmedLine.substring(metaStartIdx + META_START.length)
-                val metaEndIdx = afterStart.indexOf(META_END)
-                val payload = if (metaEndIdx != -1) afterStart.substring(0, metaEndIdx) else afterStart
-                handleMetadataFrame(payload)
-            } else {
-                val cleaned = sanitizeOutputLine(lineWithNewline)
-                if (cleaned.isNotEmpty()) {
-                    batchLines.append(cleaned)
-                }
+                handshakeSignal?.complete(true)
+                continue
+            }
+
+            // Swallow all init/su noise until handshake completes
+            if (!handshakeCompleted) {
+                continue
+            }
+
+            val cleaned = sanitizeOutputLine(lineWithNewline)
+            if (cleaned.isNotEmpty()) {
+                batchLines.append(cleaned)
             }
         }
 
@@ -664,6 +705,7 @@ class TerminalSession(
     }
 
     private fun destroyInternal() {
+        handshakeCompleted = false
         handshakeSignal?.cancel()
         handshakeSignal = null
         echoSuppressQueue.clear()

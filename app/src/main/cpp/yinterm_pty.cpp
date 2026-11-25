@@ -36,7 +36,7 @@ static void configureNoEchoTermios(int fd) {
 #endif
         tios.c_iflag &= ~(IXON | IXOFF);
         tios.c_oflag |= (OPOST | ONLCR);
-        tios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL);
+        tios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL | ECHOCTL | ECHOPRT | ECHOKE);
         tios.c_lflag |= ISIG;
         tcsetattr(fd, TCSANOW, &tios);
     }
@@ -167,7 +167,6 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
             close(slaveFd);
         }
 
-        // Pertahankan environment Android (ANDROID_ROOT, ANDROID_DATA, dll) agar su & binary sistem tidak error
         for (const auto &kv : envStrings) {
             size_t eqPos = kv.find('=');
             if (eqPos != std::string::npos && eqPos > 0) {
