@@ -50,14 +50,7 @@ class TerminalSession(
         private const val SIGKILL_NUM = 9
         const val CRASH_FILE_NAME = "yinterm_crash.txt"
 
-        private val CandidateTermuxPrefixes = listOf(
-            "/data/data/com.termux/files/usr",
-            "/data/adb/yinterm/usr"
-        )
-
         private val CandidateShells = listOf(
-            "/data/data/com.termux/files/usr/bin/zsh",
-            "/data/data/com.termux/files/usr/bin/bash",
             "/system/bin/zsh",
             "/system/xbin/zsh",
             "/data/adb/modules/zsh/system/bin/zsh",
@@ -140,18 +133,8 @@ class TerminalSession(
     private val _activeShellName = MutableStateFlow("sh")
     val activeShellName: StateFlow<String> = _activeShellName.asStateFlow()
 
-    private val _hasTermuxPkg = MutableStateFlow(false)
-    val hasTermuxPkg: StateFlow<Boolean> = _hasTermuxPkg.asStateFlow()
-
     private fun isAlive(): Boolean {
         return ptyProcess != null || (fallbackProcess?.isAlive == true)
-    }
-
-    private fun resolveTermuxPrefix(): String? {
-        return CandidateTermuxPrefixes.firstOrNull { path ->
-            val binDir = File(path, "bin")
-            binDir.exists() && binDir.isDirectory
-        }
     }
 
     private fun resolveBestShellBinary(): String {
@@ -163,14 +146,10 @@ class TerminalSession(
 
     private fun buildBaseEnvArray(): Array<String> {
         val existingPath = System.getenv("PATH") ?: "/system/bin:/system/xbin"
-        val termuxPrefix = resolveTermuxPrefix()
-        _hasTermuxPkg.value = termuxPrefix != null && File(termuxPrefix, "bin/pkg").exists()
-
-        val prefixPath = if (termuxPrefix != null) "$termuxPrefix/bin:" else ""
-        val mergedPath = "${prefixPath}/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/magisk:$existingPath"
+        val mergedPath = "/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:$existingPath"
         val homeDir = if (File("/sdcard").canWrite()) "/sdcard" else YinTermApp.instance.filesDir.absolutePath
 
-        val envList = mutableListOf(
+        return arrayOf(
             "TERM=xterm-256color",
             "COLORTERM=truecolor",
             "CLICOLOR=1",
@@ -182,12 +161,6 @@ class TerminalSession(
             "HOME=$homeDir",
             "PATH=$mergedPath"
         )
-        if (termuxPrefix != null) {
-            envList.add("PREFIX=$termuxPrefix")
-            envList.add("LD_LIBRARY_PATH=$termuxPrefix/lib")
-            envList.add("TMPDIR=$termuxPrefix/tmp")
-        }
-        return envList.toTypedArray()
     }
 
     fun resizeTerminal(rows: Int, cols: Int) {
@@ -289,7 +262,6 @@ class TerminalSession(
                     return@withContext
                 }
 
-                // Fallback ProcessBuilder jika PTY diblokir SELinux
                 var spawnedFallback: Process? = null
                 if (preferRoot) {
                     val suCmd = when (shellBaseName) {
@@ -355,19 +327,12 @@ class TerminalSession(
     }
 
     private fun buildBootstrapScript(shellBaseName: String): String {
-        val termuxPrefix = resolveTermuxPrefix()
-        val termuxExports = if (termuxPrefix != null) {
-            "export PREFIX='$termuxPrefix' LD_LIBRARY_PATH='$termuxPrefix/lib' TMPDIR='$termuxPrefix/tmp' PATH='$termuxPrefix/bin:/sbin:/system/bin:/system/xbin:/vendor/bin:\$PATH'"
-        } else {
-            "export PATH='/sbin:/system/bin:/system/xbin:/vendor/bin:\$PATH'"
-        }
-
         return """
             stty -echo -echoe -echok 2>/dev/null
             printf '\033[?2004l'
             export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
             export PS1='' PS2='' PROMPT_COMMAND=''
-            $termuxExports
+            export PATH='/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:${'$'}PATH'
             alias ls='ls --color=auto' 2>/dev/null
             alias ll='ls -la --color=auto' 2>/dev/null
             alias grep='grep --color=auto' 2>/dev/null
@@ -429,14 +394,6 @@ class TerminalSession(
                     append("%s\\n' \"\$PWD\"")
                 }
                 writeRawLocked(payload)
-            }
-        }
-    }
-
-    fun sendRawInput(rawText: String) {
-        sessionScope.launch(dispatchers.io) {
-            writeMutex.withLock {
-                writeRawLocked(rawText)
             }
         }
     }

@@ -11,33 +11,41 @@ import kotlin.math.max
 import kotlin.math.min
 
 data class TerminalThemeConfig(
-    val presetName: String = "Obsidian Crimson",
-    val backgroundHex: String = "#0A0A0C",
-    val textHex: String = "#F2F2F5",
-    val accentHex: String = "#F43F5E",
-    val fontSizeSp: Int = 13
+    val presetName: String = "Ghostty Obsidian",
+    val backgroundHex: String = "#090A0F",
+    val textHex: String = "#E6E8F0",
+    val accentHex: String = "#38BDF8",
+    val fontSizeSp: Int = 13,
+    val showQuickKeys: Boolean = true
 ) {
     val backgroundColor: Color
-        get() = parseHexColor(backgroundHex, Color(0xFF0A0A0C))
+        get() = parseHexColor(backgroundHex, Color(0xFF090A0F))
 
     val textColor: Color
-        get() = parseHexColor(textHex, Color(0xFFF2F2F5))
+        get() = parseHexColor(textHex, Color(0xFFE6E8F0))
 
     val accentColor: Color
-        get() = parseHexColor(accentHex, Color(0xFFF43F5E))
+        get() = parseHexColor(accentHex, Color(0xFF38BDF8))
 
     val surfaceColor: Color
         get() {
             val bg = backgroundColor
             val target = if (bg.luminance() < 0.5f) Color.White else Color.Black
-            return lerp(bg, target, 0.06f)
+            return lerp(bg, target, 0.055f)
+        }
+
+    val elevatedSurfaceColor: Color
+        get() {
+            val bg = backgroundColor
+            val target = if (bg.luminance() < 0.5f) Color.White else Color.Black
+            return lerp(bg, target, 0.095f)
         }
 
     val borderColor: Color
-        get() = lerp(backgroundColor, textColor, 0.16f)
+        get() = lerp(backgroundColor, textColor, 0.14f)
 
     val mutedTextColor: Color
-        get() = lerp(backgroundColor, textColor, 0.62f)
+        get() = lerp(backgroundColor, textColor, 0.58f)
 
     val textContrastRatio: Float
         get() {
@@ -51,33 +59,39 @@ data class TerminalThemeConfig(
     companion object {
         val Presets: List<TerminalThemeConfig> = listOf(
             TerminalThemeConfig(
+                presetName = "Ghostty Obsidian",
+                backgroundHex = "#090A0F",
+                textHex = "#E6E8F0",
+                accentHex = "#38BDF8"
+            ),
+            TerminalThemeConfig(
                 presetName = "Obsidian Crimson",
                 backgroundHex = "#0A0A0C",
                 textHex = "#F2F2F5",
                 accentHex = "#F43F5E"
             ),
             TerminalThemeConfig(
-                presetName = "Emerald Matrix",
-                backgroundHex = "#070D0A",
-                textHex = "#E2F8EC",
-                accentHex = "#22C55E"
+                presetName = "Catppuccin Mocha",
+                backgroundHex = "#11111B",
+                textHex = "#CDD6F4",
+                accentHex = "#CBA6F7"
             ),
             TerminalThemeConfig(
                 presetName = "Tokyo Night",
-                backgroundHex = "#1A1B26",
+                backgroundHex = "#16161E",
                 textHex = "#C0CAF5",
                 accentHex = "#7AA2F7"
             ),
             TerminalThemeConfig(
-                presetName = "Nord Frost",
-                backgroundHex = "#2E3440",
-                textHex = "#ECEFF4",
-                accentHex = "#88C0D0"
+                presetName = "Emerald Matrix",
+                backgroundHex = "#060C09",
+                textHex = "#DCFCE7",
+                accentHex = "#22C55E"
             ),
             TerminalThemeConfig(
                 presetName = "Amber Phosphor",
-                backgroundHex = "#0D0A06",
-                textHex = "#FDE68A",
+                backgroundHex = "#0C0906",
+                textHex = "#FEF3C7",
                 accentHex = "#F59E0B"
             )
         )
@@ -104,11 +118,12 @@ class TerminalThemeStore(context: Context) {
 
     private fun loadSavedTheme(): TerminalThemeConfig {
         return TerminalThemeConfig(
-            presetName = prefs.getString("preset_name", "Obsidian Crimson") ?: "Obsidian Crimson",
-            backgroundHex = prefs.getString("bg_hex", "#0A0A0C") ?: "#0A0A0C",
-            textHex = prefs.getString("text_hex", "#F2F2F5") ?: "#F2F2F5",
-            accentHex = prefs.getString("accent_hex", "#F43F5E") ?: "#F43F5E",
-            fontSizeSp = prefs.getInt("font_size", 13).coerceIn(9, 26)
+            presetName = prefs.getString("preset_name", "Ghostty Obsidian") ?: "Ghostty Obsidian",
+            backgroundHex = prefs.getString("bg_hex", "#090A0F") ?: "#090A0F",
+            textHex = prefs.getString("text_hex", "#E6E8F0") ?: "#E6E8F0",
+            accentHex = prefs.getString("accent_hex", "#38BDF8") ?: "#38BDF8",
+            fontSizeSp = prefs.getInt("font_size", 13).coerceIn(9, 26),
+            showQuickKeys = prefs.getBoolean("show_quick_keys", true)
         )
     }
 
@@ -121,6 +136,7 @@ class TerminalThemeStore(context: Context) {
             .putString("text_hex", clamped.textHex)
             .putString("accent_hex", clamped.accentHex)
             .putInt("font_size", clamped.fontSizeSp)
+            .putBoolean("show_quick_keys", clamped.showQuickKeys)
             .apply()
     }
 }

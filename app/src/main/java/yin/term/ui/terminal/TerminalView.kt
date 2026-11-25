@@ -798,7 +798,7 @@ private fun TerminalQuickKeysBar(
         "~" to "~",
         "&&" to " && ",
         "ls -la" to "ls -la",
-        "pkg " to "pkg "
+        "grep " to "grep "
     )
 
     Column(
@@ -1148,7 +1148,7 @@ private fun ThemeCustomizerDialog(
                 ) {
                     Column {
                         Text(
-                            text = "sdcard ❯ pkg update && ls -la",
+                            text = "sdcard ❯ ls -la /sdcard",
                             color = previewConfig.accentColor,
                             fontFamily = FontFamily.Monospace,
                             fontSize = 12.sp,
