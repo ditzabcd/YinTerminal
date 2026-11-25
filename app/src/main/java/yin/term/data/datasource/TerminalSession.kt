@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import com.yin.term.YinTermApp
+import com.yin.term.core.AnsiParser
 import com.yin.term.core.AppDispatchers
 import com.yin.term.domain.model.TerminalLog
 import com.yin.term.domain.model.TerminalState
@@ -41,15 +42,22 @@ class TerminalSession(
     private val dispatchers: AppDispatchers
 ) {
     companion object {
-        private const val PWD_MARKER = "__YINTERM_PWD__:"
-        private const val SHELL_MARKER = "__YINTERM_SH__:"
+        private const val PWD_MARKER = "\u001E__YIN_PWD__\u001F"
+        private const val SHELL_MARKER = "\u001E__YIN_SH__\u001F"
         private const val STREAM_BUFFER_SIZE = 4096
-        private const val FLUSH_INTERVAL_MS = 16L
+        private const val FLUSH_INTERVAL_MS = 20L
         private const val SIGINT_NUM = 2
         private const val SIGKILL_NUM = 9
         const val CRASH_FILE_NAME = "yinterm_crash.txt"
 
+        private val CandidateTermuxPrefixes = listOf(
+            "/data/data/com.termux/files/usr",
+            "/data/adb/yinterm/usr"
+        )
+
         private val CandidateShells = listOf(
+            "/data/data/com.termux/files/usr/bin/zsh",
+            "/data/data/com.termux/files/usr/bin/bash",
             "/system/bin/zsh",
             "/system/xbin/zsh",
             "/data/adb/modules/zsh/system/bin/zsh",
@@ -120,7 +128,7 @@ class TerminalSession(
     @Volatile
     private var terminalCols = 80
 
-    private val _currentDirectory = MutableStateFlow("/")
+    private val _currentDirectory = MutableStateFlow("/sdcard")
     val currentDirectory: StateFlow<String> = _currentDirectory.asStateFlow()
 
     private val _isRootActive = MutableStateFlow(false)
@@ -132,8 +140,18 @@ class TerminalSession(
     private val _activeShellName = MutableStateFlow("sh")
     val activeShellName: StateFlow<String> = _activeShellName.asStateFlow()
 
+    private val _hasTermuxPkg = MutableStateFlow(false)
+    val hasTermuxPkg: StateFlow<Boolean> = _hasTermuxPkg.asStateFlow()
+
     private fun isAlive(): Boolean {
         return ptyProcess != null || (fallbackProcess?.isAlive == true)
+    }
+
+    private fun resolveTermuxPrefix(): String? {
+        return CandidateTermuxPrefixes.firstOrNull { path ->
+            val binDir = File(path, "bin")
+            binDir.exists() && binDir.isDirectory
+        }
     }
 
     private fun resolveBestShellBinary(): String {
@@ -145,17 +163,31 @@ class TerminalSession(
 
     private fun buildBaseEnvArray(): Array<String> {
         val existingPath = System.getenv("PATH") ?: "/system/bin:/system/xbin"
-        val mergedPath = "/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/magisk:$existingPath"
+        val termuxPrefix = resolveTermuxPrefix()
+        _hasTermuxPkg.value = termuxPrefix != null && File(termuxPrefix, "bin/pkg").exists()
+
+        val prefixPath = if (termuxPrefix != null) "$termuxPrefix/bin:" else ""
+        val mergedPath = "${prefixPath}/sbin:/system/bin:/system/xbin:/vendor/bin:/data/adb/magisk:$existingPath"
         val homeDir = if (File("/sdcard").canWrite()) "/sdcard" else YinTermApp.instance.filesDir.absolutePath
-        return arrayOf(
+
+        val envList = mutableListOf(
             "TERM=xterm-256color",
             "COLORTERM=truecolor",
             "CLICOLOR=1",
             "FORCE_COLOR=1",
             "LANG=en_US.UTF-8",
+            "PS1=",
+            "PS2=",
+            "PROMPT_COMMAND=",
             "HOME=$homeDir",
             "PATH=$mergedPath"
         )
+        if (termuxPrefix != null) {
+            envList.add("PREFIX=$termuxPrefix")
+            envList.add("LD_LIBRARY_PATH=$termuxPrefix/lib")
+            envList.add("TMPDIR=$termuxPrefix/tmp")
+        }
+        return envList.toTypedArray()
     }
 
     fun resizeTerminal(rows: Int, cols: Int) {
@@ -187,7 +219,6 @@ class TerminalSession(
                 var spawnedPty: NativePty.PtyProcess? = null
                 var rootGranted = false
 
-                // 1. Primary path: Real Linux C++ PTY (enables native colors, Ctrl+C, and TIOCSWINSZ)
                 if (NativePty.isAvailable) {
                     if (preferRoot) {
                         val suArgs = when (shellBaseName) {
@@ -204,8 +235,7 @@ class TerminalSession(
                             cols = terminalCols
                         )
                         if (rootPty != null) {
-                            delay(110L)
-                            // Verify su did not immediately exit with permission denied
+                            delay(120L)
                             val checkStatus = runCatching {
                                 Runtime.getRuntime().exec(arrayOf("kill", "-0", rootPty.pid.toString())).waitFor()
                             }.getOrDefault(-1)
@@ -259,7 +289,7 @@ class TerminalSession(
                     return@withContext
                 }
 
-                // 2. Fallback path: Standard ProcessBuilder pipes if PTY creation is restricted
+                // Fallback ProcessBuilder jika PTY diblokir SELinux
                 var spawnedFallback: Process? = null
                 if (preferRoot) {
                     val suCmd = when (shellBaseName) {
@@ -272,7 +302,7 @@ class TerminalSession(
                     }.getOrNull()
 
                     if (suAttempt != null) {
-                        delay(100L)
+                        delay(110L)
                         if (suAttempt.isAlive) {
                             spawnedFallback = suAttempt
                             rootGranted = true
@@ -325,9 +355,19 @@ class TerminalSession(
     }
 
     private fun buildBootstrapScript(shellBaseName: String): String {
+        val termuxPrefix = resolveTermuxPrefix()
+        val termuxExports = if (termuxPrefix != null) {
+            "export PREFIX='$termuxPrefix' LD_LIBRARY_PATH='$termuxPrefix/lib' TMPDIR='$termuxPrefix/tmp' PATH='$termuxPrefix/bin:/sbin:/system/bin:/system/xbin:/vendor/bin:\$PATH'"
+        } else {
+            "export PATH='/sbin:/system/bin:/system/xbin:/vendor/bin:\$PATH'"
+        }
+
         return """
+            stty -echo -echoe -echok 2>/dev/null
+            printf '\033[?2004l'
             export TERM=xterm-256color COLORTERM=truecolor CLICOLOR=1 FORCE_COLOR=1 LANG=en_US.UTF-8
-            export PATH="/sbin:/system/bin:/system/xbin:/vendor/bin:${'$'}PATH"
+            export PS1='' PS2='' PROMPT_COMMAND=''
+            $termuxExports
             alias ls='ls --color=auto' 2>/dev/null
             alias ll='ls -la --color=auto' 2>/dev/null
             alias grep='grep --color=auto' 2>/dev/null
@@ -342,7 +382,7 @@ class TerminalSession(
               }
             fi
             cd /sdcard 2>/dev/null || cd "${'$'}HOME" 2>/dev/null || cd /
-            printf '%s%s\n%s%s\n' '$PWD_MARKER' "${'$'}PWD" '$SHELL_MARKER' '$shellBaseName'
+            printf '${PWD_MARKER}%s\n${SHELL_MARKER}%s\n' "${'$'}PWD" '$shellBaseName'
         """.trimIndent()
     }
 
@@ -384,11 +424,19 @@ class TerminalSession(
                 val payload = buildString {
                     append(command)
                     append('\n')
-                    append("printf '%s%s\\n' '")
+                    append("stty -echo 2>/dev/null; printf '")
                     append(PWD_MARKER)
-                    append("' \"\$PWD\"")
+                    append("%s\\n' \"\$PWD\"")
                 }
                 writeRawLocked(payload)
+            }
+        }
+    }
+
+    fun sendRawInput(rawText: String) {
+        sessionScope.launch(dispatchers.io) {
+            writeMutex.withLock {
+                writeRawLocked(rawText)
             }
         }
     }
@@ -487,6 +535,7 @@ class TerminalSession(
             .onUnmappableCharacter(CodingErrorAction.REPLACE)
         val charBuf = CharBuffer.allocate(STREAM_BUFFER_SIZE)
         val pendingLine = StringBuilder()
+        var incompleteEscape = ""
         var lastFlushTime = System.currentTimeMillis()
 
         try {
@@ -499,7 +548,14 @@ class TerminalSession(
                 charBuf.flip()
                 if (charBuf.remaining() == 0) continue
 
-                pendingLine.append(charBuf)
+                val combined = incompleteEscape + charBuf.toString()
+                val (readyText, leftoverEscape) = AnsiParser.extractCompleteChunk(combined)
+                incompleteEscape = leftoverEscape
+
+                if (readyText.isNotEmpty()) {
+                    pendingLine.append(readyText)
+                }
+
                 val now = System.currentTimeMillis()
                 if (now - lastFlushTime >= FLUSH_INTERVAL_MS || pendingLine.indexOf("\n") != -1) {
                     processStdoutBuffer(pendingLine)
@@ -510,8 +566,8 @@ class TerminalSession(
         } finally {
             if (pendingLine.isNotEmpty()) {
                 processStdoutBuffer(pendingLine)
-                val leftover = pendingLine.toString()
-                if (leftover.isNotEmpty() && !leftover.startsWith(PWD_MARKER) && !leftover.startsWith(SHELL_MARKER)) {
+                val leftover = sanitizeInternalArtifacts(pendingLine.toString())
+                if (leftover.isNotEmpty()) {
                     terminalLogRepository.addLog(
                         TerminalLog(TerminalState.Success, leftover)
                     )
@@ -524,6 +580,7 @@ class TerminalSession(
         val reader = InputStreamReader(stream, StandardCharsets.UTF_8)
         val buffer = CharArray(STREAM_BUFFER_SIZE)
         val pendingLine = StringBuilder()
+        var incompleteEscape = ""
         var lastFlushTime = System.currentTimeMillis()
 
         try {
@@ -532,14 +589,21 @@ class TerminalSession(
                 if (charsRead == -1) break
                 if (charsRead == 0) continue
 
-                val chunk = String(buffer, 0, charsRead)
+                val combined = incompleteEscape + String(buffer, 0, charsRead)
+                val (readyText, leftoverEscape) = AnsiParser.extractCompleteChunk(combined)
+                incompleteEscape = leftoverEscape
+
+                if (readyText.isEmpty()) continue
 
                 if (isErrorStream) {
-                    terminalLogRepository.addLog(
-                        TerminalLog(TerminalState.Error, chunk)
-                    )
+                    val cleanErr = sanitizeInternalArtifacts(readyText)
+                    if (cleanErr.isNotEmpty()) {
+                        terminalLogRepository.addLog(
+                            TerminalLog(TerminalState.Error, cleanErr)
+                        )
+                    }
                 } else {
-                    pendingLine.append(chunk)
+                    pendingLine.append(readyText)
                     val now = System.currentTimeMillis()
                     if (now - lastFlushTime >= FLUSH_INTERVAL_MS || pendingLine.indexOf("\n") != -1) {
                         processStdoutBuffer(pendingLine)
@@ -552,8 +616,8 @@ class TerminalSession(
             if (!isErrorStream) {
                 if (pendingLine.isNotEmpty()) {
                     processStdoutBuffer(pendingLine)
-                    val leftover = pendingLine.toString()
-                    if (leftover.isNotEmpty() && !leftover.startsWith(PWD_MARKER) && !leftover.startsWith(SHELL_MARKER)) {
+                    val leftover = sanitizeInternalArtifacts(pendingLine.toString())
+                    if (leftover.isNotEmpty()) {
                         terminalLogRepository.addLog(
                             TerminalLog(TerminalState.Success, leftover)
                         )
@@ -566,6 +630,13 @@ class TerminalSession(
         }
     }
 
+    private fun sanitizeInternalArtifacts(line: String): String {
+        if (line.contains("__YIN_PWD__") || line.contains("__YIN_SH__") || line.contains("stty -echo")) {
+            return ""
+        }
+        return line
+    }
+
     private suspend fun processStdoutBuffer(buffer: StringBuilder) {
         val batchLines = StringBuilder()
 
@@ -574,10 +645,9 @@ class TerminalSession(
             if (newlineIdx == -1) {
                 val current = buffer.toString()
                 if (current.isNotEmpty() &&
-                    !PWD_MARKER.startsWith(current) &&
-                    !SHELL_MARKER.startsWith(current) &&
-                    !current.contains(PWD_MARKER) &&
-                    !current.contains(SHELL_MARKER)
+                    !current.contains('\u001E') &&
+                    !current.contains("__YIN_") &&
+                    !current.contains("stty -echo")
                 ) {
                     batchLines.append(current)
                     buffer.clear()
@@ -595,23 +665,30 @@ class TerminalSession(
             when {
                 pwdIdx != -1 -> {
                     if (pwdIdx > 0) {
-                        batchLines.append(trimmedLine.substring(0, pwdIdx)).append('\n')
+                        val prefix = sanitizeInternalArtifacts(trimmedLine.substring(0, pwdIdx))
+                        if (prefix.isNotEmpty()) batchLines.append(prefix).append('\n')
                     }
                     val newPwd = trimmedLine.substring(pwdIdx + PWD_MARKER.length).trim()
-                    if (newPwd.isNotEmpty()) {
+                    if (newPwd.startsWith("/")) {
                         _currentDirectory.value = newPwd
                     }
                 }
                 shellIdx != -1 -> {
                     if (shellIdx > 0) {
-                        batchLines.append(trimmedLine.substring(0, shellIdx)).append('\n')
+                        val prefix = sanitizeInternalArtifacts(trimmedLine.substring(0, shellIdx))
+                        if (prefix.isNotEmpty()) batchLines.append(prefix).append('\n')
                     }
                     val detectedShell = trimmedLine.substring(shellIdx + SHELL_MARKER.length).trim()
                     if (detectedShell.isNotEmpty()) {
                         _activeShellName.value = detectedShell
                     }
                 }
-                else -> batchLines.append(lineWithNewline)
+                else -> {
+                    val cleaned = sanitizeInternalArtifacts(lineWithNewline)
+                    if (cleaned.isNotEmpty()) {
+                        batchLines.append(cleaned)
+                    }
+                }
             }
         }
 

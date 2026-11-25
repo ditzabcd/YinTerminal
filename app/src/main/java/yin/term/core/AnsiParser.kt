@@ -35,6 +35,35 @@ object AnsiParser {
     private val CsiSequenceRegex = Regex("""\u001B\[([0-9:;?]*)([ -/]*[@-~])""")
     private val OscSequenceRegex = Regex("""\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)""")
     private val Vt100SingleEscRegex = Regex("""\u001B(?:\([0-9A-Za-z]|\)[0-9A-Za-z]|[=>78DMEHc])""")
+    private val ControlCharsCleanupRegex = Regex("""[\u0000-\u0008\u000B-\u001A\u001C-\u001F\u007F]""")
+
+    /**
+     * Memisahkan escape sequence yang terpotong di ujung chunk agar tidak tercetak sebagai teks random.
+     * Mengembalikan Pair(teksSiapRender, sisaIncompleteEscape).
+     */
+    fun extractCompleteChunk(rawChunk: String): Pair<String, String> {
+        val lastEsc = rawChunk.lastIndexOf('\u001B')
+        if (lastEsc == -1) return rawChunk to ""
+
+        val tail = rawChunk.substring(lastEsc)
+        if (tail.length == 1) {
+            return rawChunk.substring(0, lastEsc) to tail
+        }
+
+        val second = tail[1]
+        if (second == '[') {
+            val terminated = tail.drop(2).any { ch -> ch in '@'..'~' }
+            if (!terminated && tail.length < 64) {
+                return rawChunk.substring(0, lastEsc) to tail
+            }
+        } else if (second == ']') {
+            val terminated = tail.contains('\u0007') || tail.contains("\u001B\\")
+            if (!terminated && tail.length < 256) {
+                return rawChunk.substring(0, lastEsc) to tail
+            }
+        }
+        return rawChunk to ""
+    }
 
     private data class AnsiStyleState(
         var fg: Color,
@@ -102,6 +131,7 @@ object AnsiParser {
         val normalized = normalizeCarriageReturns(rawText)
             .replace(OscSequenceRegex, "")
             .replace(Vt100SingleEscRegex, "")
+            .replace(ControlCharsCleanupRegex, "")
 
         if (!normalized.contains('\u001B')) {
             return AnnotatedString(normalized)
@@ -114,10 +144,12 @@ object AnsiParser {
             for (match in CsiSequenceRegex.findAll(normalized)) {
                 val start = match.range.first
                 if (start > cursor) {
-                    val segment = normalized.substring(cursor, start)
-                    pushStyle(state.toSpanStyle(defaultBg))
-                    append(segment)
-                    pop()
+                    val segment = normalized.substring(cursor, start).replace("\u001B", "")
+                    if (segment.isNotEmpty()) {
+                        pushStyle(state.toSpanStyle(defaultBg))
+                        append(segment)
+                        pop()
+                    }
                 }
 
                 val paramsRaw = match.groupValues[1]
@@ -149,7 +181,7 @@ object AnsiParser {
             color = defaultColor,
             fontFamily = FontFamily.Monospace,
             fontSize = fontSizeSp.sp,
-            lineHeight = (fontSizeSp + 4).sp,
+            lineHeight = (fontSizeSp + 5).sp,
             fontFeatureSettings = "tnum"
         )
     }

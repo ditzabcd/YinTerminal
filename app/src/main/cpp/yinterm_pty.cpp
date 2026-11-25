@@ -12,13 +12,16 @@
 #include <vector>
 #include <string>
 
-static void setWindowSizeInternal(int masterFd, int rows, int cols) {
+static void setWindowSizeInternal(int masterFd, pid_t pid, int rows, int cols) {
     if (masterFd < 0) return;
     struct winsize ws;
     memset(&ws, 0, sizeof(ws));
     ws.ws_row = static_cast<unsigned short>(rows > 0 ? rows : 24);
     ws.ws_col = static_cast<unsigned short>(cols > 0 ? cols : 80);
     ioctl(masterFd, TIOCSWINSZ, &ws);
+    if (pid > 0) {
+        kill(-pid, SIGWINCH);
+    }
 }
 
 extern "C" JNIEXPORT jintArray JNICALL
@@ -52,14 +55,15 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
     }
 
     fcntl(masterFd, F_SETFD, FD_CLOEXEC);
-    setWindowSizeInternal(masterFd, rows, cols);
+    setWindowSizeInternal(masterFd, -1, rows, cols);
 
     struct termios tios;
     if (tcgetattr(masterFd, &tios) == 0) {
 #ifdef IUTF8
         tios.c_iflag |= IUTF8;
 #endif
-        tios.c_lflag &= ~ECHO;
+        tios.c_oflag |= (OPOST | ONLCR);
+        tios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
         tios.c_lflag |= ISIG;
         tcsetattr(masterFd, TCSANOW, &tios);
     }
@@ -147,6 +151,13 @@ Java_com_yin_term_data_datasource_NativePty_createSubprocess(
         ioctl(slaveFd, TIOCSCTTY, 0);
 #endif
 
+        struct termios slaveTios;
+        if (tcgetattr(slaveFd, &slaveTios) == 0) {
+            slaveTios.c_lflag &= ~(ECHO | ECHOE | ECHOK | ECHONL);
+            slaveTios.c_lflag |= ISIG;
+            tcsetattr(slaveFd, TCSANOW, &slaveTios);
+        }
+
         dup2(slaveFd, STDIN_FILENO);
         dup2(slaveFd, STDOUT_FILENO);
         dup2(slaveFd, STDERR_FILENO);
@@ -199,7 +210,7 @@ Java_com_yin_term_data_datasource_NativePty_setWindowSize(
 ) {
     (void)env;
     (void)thiz;
-    setWindowSizeInternal(masterFd, rows, cols);
+    setWindowSizeInternal(masterFd, -1, rows, cols);
 }
 
 extern "C" JNIEXPORT jint JNICALL
